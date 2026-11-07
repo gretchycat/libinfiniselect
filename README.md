@@ -59,3 +59,5 @@ source adapter. Relay references expire after 24 hours.
 ## Build
 
 From this directory, run `gradle :select-android:assembleRelease`.
+
+See [LICENSE.md](LICENSE.md) for the current license status.
