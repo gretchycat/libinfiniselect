@@ -1,0 +1,12 @@
+<resources>
+    <!-- The selector activity waits behind InfiniFolder's application overlay. Keep its
+         window transparent until the library needs to show its own fallback interface. -->
+    <style name="InfiniSelect.TransparentActivity" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

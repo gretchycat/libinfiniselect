@@ -4,11 +4,15 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.util.TypedValue
 import android.view.Gravity
+import android.view.WindowManager
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.HorizontalScrollView
@@ -25,6 +29,11 @@ class FileSelectActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The host may show InfiniFolder's floating selector over another app. This
+        // activity exists only to relay its result, so keep the handoff invisible and
+        // non-interactive while the overlay is loading.
+        window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         request = intent.toRequest() ?: run { finish(); return }
         startPreferredSource()
     }
@@ -54,11 +63,17 @@ class FileSelectActivity : Activity() {
 
     private fun showSourceChooser() {
         inSourceChooser = true
+        window.clearFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         val pad = (20 * resources.displayMetrics.density).toInt()
+        val night = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        val backgroundColor = themeColor(android.R.attr.colorBackground, if (night) 0xFF202124.toInt() else 0xFFFAFAFA.toInt())
+        window.setBackgroundDrawable(ColorDrawable(backgroundColor))
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
             gravity = Gravity.TOP
+            setBackgroundColor(backgroundColor)
         }
         val identity = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -127,7 +142,17 @@ class FileSelectActivity : Activity() {
             alpha = .75f
             setPadding(0, pad, 0, 0)
         })
-        setContentView(page)
+        setContentView(android.widget.ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(backgroundColor)
+            addView(page, ViewGroup.LayoutParams(-1, -2))
+        })
+    }
+
+    private fun themeColor(attribute: Int, fallback: Int): Int {
+        val value = TypedValue()
+        return if (theme.resolveAttribute(attribute, value, true) && value.type in TypedValue.TYPE_FIRST_COLOR_INT..TypedValue.TYPE_LAST_COLOR_INT)
+            value.data else fallback
     }
 
     private fun launchSafPicker() {
