@@ -253,6 +253,9 @@ class FileSelectActivity : Activity() {
             mimeTypes = getStringArrayListExtra(FileSelectionContract.EXTRA_MIME_TYPES)?.takeIf { it.isNotEmpty() } ?: arrayListOf("*/*"),
             allowMultiple = getBooleanExtra(FileSelectionContract.EXTRA_ALLOW_MULTIPLE, false),
             initialDirectory = getParcelableExtraCompat(FileSelectionContract.EXTRA_INITIAL_DIRECTORY),
+            supportedExtensions = getStringArrayListExtra(FileSelectionContract.EXTRA_SUPPORTED_EXTENSIONS).orEmpty(),
+            hideUnsupported = getBooleanExtra(FileSelectionContract.EXTRA_HIDE_UNSUPPORTED, false),
+            initialScrollY = getIntExtra(FileSelectionContract.EXTRA_INITIAL_SCROLL_Y, 0).coerceAtLeast(0),
         ) } catch (_: Exception) { null }
     }
 

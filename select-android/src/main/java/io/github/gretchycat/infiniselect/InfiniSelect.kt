@@ -13,6 +13,12 @@ data class OpenRequest(
     val mimeTypes: List<String> = listOf("*/*"),
     val allowMultiple: Boolean = false,
     val initialDirectory: Uri? = null,
+    /** Filename extensions accepted by the requesting viewer, without leading dots. */
+    val supportedExtensions: List<String> = emptyList(),
+    /** Hide unsupported leaf files in sources that can filter their listing. */
+    val hideUnsupported: Boolean = false,
+    /** Restore the source listing's vertical scroll position when reopening it. */
+    val initialScrollY: Int = 0,
 ) {
     init {
         require(clientId.matches(Regex("[A-Za-z0-9._-]{1,80}"))) { "clientId must be a short stable identifier" }
@@ -24,6 +30,9 @@ data class OpenRequest(
         putString(FileSelectionContract.EXTRA_DISPLAY_NAME, displayName)
         putStringArrayList(FileSelectionContract.EXTRA_MIME_TYPES, ArrayList(mimeTypes))
         putBoolean(FileSelectionContract.EXTRA_ALLOW_MULTIPLE, allowMultiple)
+        putStringArrayList(FileSelectionContract.EXTRA_SUPPORTED_EXTENSIONS, ArrayList(supportedExtensions))
+        putBoolean(FileSelectionContract.EXTRA_HIDE_UNSUPPORTED, hideUnsupported)
+        putInt(FileSelectionContract.EXTRA_INITIAL_SCROLL_Y, initialScrollY.coerceAtLeast(0))
         initialDirectory?.let { putParcelable(FileSelectionContract.EXTRA_INITIAL_DIRECTORY, it) }
     }
 }

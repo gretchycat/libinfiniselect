@@ -50,6 +50,15 @@ Backends can be registered with `FileSourceRegistry` or through Java
 contract (`Activity` result with `data`, MIME type, display name, and URI read
 grant) and choose their own rendering path.
 
+Viewers can pass `supportedExtensions` alongside `mimeTypes` and set
+`hideUnsupported = true` to hide unsupported files in listing-capable sources.
+The InfiniFolder floating picker keeps directories and browsable archive or
+filesystem-image containers visible, so users can navigate into them, while
+only allowing matching files to be selected. MIME and extension matches are
+combined, which lets a viewer accept files whose storage backend reports a
+generic MIME type. The Android SAF fallback receives the MIME filters; Android
+document providers do not expose a portable extension-filter API.
+
 InfiniFolder streams selected items through a grantable, read-only content URI.
 This supports files in VFS backends and archive entries without asking the
 receiving app to reuse a remote credential. The stream is sequential; a viewer
