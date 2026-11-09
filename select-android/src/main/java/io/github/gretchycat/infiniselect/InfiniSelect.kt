@@ -5,6 +5,8 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.content.Intent
+import android.database.Cursor
+import android.provider.OpenableColumns
 
 /** Request parameters for one viewer's file-open action. */
 data class OpenRequest(
@@ -19,10 +21,17 @@ data class OpenRequest(
     val hideUnsupported: Boolean = false,
     /** Restore the source listing's vertical scroll position when reopening it. */
     val initialScrollY: Int = 0,
+    /** Package a multi-file selection as JSPF, retaining the individual content URIs. */
+    val multipleSelectionDelivery: MultipleSelectionDelivery = MultipleSelectionDelivery.ITEM_URIS,
+    /** Optionally return a companion XML document with the selected-item metadata. */
+    val metadataFormat: SelectionMetadataFormat = SelectionMetadataFormat.NONE,
+    /** Let InfiniFolder turn a folder's nested audio files into one playlist. */
+    val allowRecursiveAudioDirectories: Boolean = false,
 ) {
     init {
         require(clientId.matches(Regex("[A-Za-z0-9._-]{1,80}"))) { "clientId must be a short stable identifier" }
         require(mimeTypes.isNotEmpty()) { "At least one MIME type is required" }
+        require(!allowRecursiveAudioDirectories || allowMultiple) { "Recursive audio selection requires multiple selection" }
     }
 
     internal fun toBundle() = Bundle().apply {
@@ -33,8 +42,29 @@ data class OpenRequest(
         putStringArrayList(FileSelectionContract.EXTRA_SUPPORTED_EXTENSIONS, ArrayList(supportedExtensions))
         putBoolean(FileSelectionContract.EXTRA_HIDE_UNSUPPORTED, hideUnsupported)
         putInt(FileSelectionContract.EXTRA_INITIAL_SCROLL_Y, initialScrollY.coerceAtLeast(0))
+        putString(FileSelectionContract.EXTRA_MULTIPLE_DELIVERY, multipleSelectionDelivery.name)
+        putString(FileSelectionContract.EXTRA_METADATA_FORMAT, metadataFormat.name)
+        putBoolean(FileSelectionContract.EXTRA_ALLOW_RECURSIVE_AUDIO_DIRECTORIES, allowRecursiveAudioDirectories)
         initialDirectory?.let { putParcelable(FileSelectionContract.EXTRA_INITIAL_DIRECTORY, it) }
     }
+}
+
+enum class MultipleSelectionDelivery { ITEM_URIS, JSPF }
+enum class SelectionMetadataFormat { NONE, XML }
+
+data class SelectionItem(
+    val uri: Uri,
+    val name: String,
+    val mimeType: String = "application/octet-stream",
+    val sizeBytes: Long? = null,
+)
+
+data class SelectionResult(
+    val items: List<SelectionItem>,
+    val playlistUri: Uri? = null,
+    val metadataUri: Uri? = null,
+) {
+    val primaryUri: Uri? get() = playlistUri ?: items.firstOrNull()?.uri
 }
 
 /** Launches the reusable file selection flow from an Activity. */
@@ -62,6 +92,94 @@ object InfiniSelect {
             else putString(DIRECTORY_PREFIX + clientId, uri.toString())
         }.apply()
     }
+
+    /** Read the normalized single- or multi-item result returned by [FileSelectActivity]. */
+    fun readResult(context: Context, intent: Intent): SelectionResult {
+        val uris = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_URIS)
+            ?.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() }
+            .orEmpty()
+        val names = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_NAMES).orEmpty()
+        val mimes = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_MIMES).orEmpty()
+        val sizes = intent.getLongArrayExtra(FileSelectionContract.EXTRA_RESULT_SIZES)
+        val itemUris = if (uris.isNotEmpty()) uris else buildList {
+            intent.data?.let { add(it) }
+            intent.clipData?.let { clip ->
+                for (i in 0 until clip.itemCount) clip.getItemAt(i).uri?.let(::add)
+            }
+        }.distinct()
+        val items = itemUris.mapIndexed { index, uri ->
+            val queried = queryItem(context, uri)
+            SelectionItem(
+                uri = uri,
+                name = names.getOrNull(index)?.takeIf(String::isNotBlank) ?: queried.first ?: uri.lastPathSegment.orEmpty(),
+                mimeType = mimes.getOrNull(index)?.takeIf(String::isNotBlank)
+                    ?: context.contentResolver.getType(uri) ?: "application/octet-stream",
+                sizeBytes = sizes?.getOrNull(index)?.takeIf { it >= 0L } ?: queried.second,
+            )
+        }
+        val playlist = intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_PLAYLIST_URI)
+            ?.let(Uri::parse)
+            ?: intent.data?.takeIf { intent.type == JSPF_MIME }
+        val metadata = intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_METADATA_URI)?.let(Uri::parse)
+        return SelectionResult(items, playlist, metadata)
+    }
+
+    /** Create a readable JSPF document whose locations are the supplied content/file URIs. */
+    fun createJspfPlaylist(context: Context, items: List<SelectionItem>, title: String = "Selection.jspf"): Uri {
+        require(items.isNotEmpty()) { "A playlist needs at least one item" }
+        val tracks = org.json.JSONArray()
+        items.forEach { item ->
+            val fields = org.json.JSONObject()
+                .put("location", item.uri.toString())
+                .put("title", item.name)
+                .put("extension", org.json.JSONObject().put("io.github.gretchycat.infiniselect", org.json.JSONObject()
+                    .put("mimeType", item.mimeType)
+                    .put("sizeBytes", item.sizeBytes ?: org.json.JSONObject.NULL)))
+            tracks.put(fields)
+        }
+        val json = org.json.JSONObject().put("playlist", org.json.JSONObject()
+            .put("title", title.substringBeforeLast('.', title))
+            .put("track", tracks))
+        return SelectionDocumentProvider.create(context, title.ensureExtension("jspf"), JSPF_MIME,
+            json.toString(2).toByteArray(Charsets.UTF_8))
+    }
+
+    /** Create an XML metadata document for the same URI list, without reading file contents. */
+    fun createMetadataXml(context: Context, items: List<SelectionItem>, title: String = "Selection.xml"): Uri {
+        val xml = buildString {
+            append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+            append("<selection xmlns=\"urn:github:gretchycat:infiniselect:selection:1\" title=\"")
+            append(title.xmlEscape()).append("\">\n")
+            items.forEach { item ->
+                append("  <item uri=\"").append(item.uri.toString().xmlEscape())
+                    .append("\" name=\"").append(item.name.xmlEscape())
+                    .append("\" mimeType=\"").append(item.mimeType.xmlEscape()).append("\"")
+                item.sizeBytes?.takeIf { it >= 0L }?.let { append(" sizeBytes=\"").append(it).append("\"") }
+                append("/>\n")
+            }
+            append("</selection>\n")
+        }
+        return SelectionDocumentProvider.create(context, title.ensureExtension("xml"), "application/xml",
+            xml.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun queryItem(context: Context, uri: Uri): Pair<String?, Long?> = runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+            ?.use { cursor: Cursor ->
+                if (!cursor.moveToFirst()) null to null else {
+                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    (nameIndex.takeIf { it >= 0 }?.let(cursor::getString)) to
+                        (sizeIndex.takeIf { it >= 0 }?.let(cursor::getLong)?.takeIf { it >= 0L })
+                }
+            } ?: (null to null)
+    }.getOrDefault(null to null)
+
+    private fun String.ensureExtension(extension: String) = if (substringAfterLast('.', "").equals(extension, true)) this else "$this.$extension"
+    private fun String.xmlEscape() = replace(Regex("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F]"), "")
+        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace("\"", "&quot;").replace("'", "&apos;")
+    internal const val JSPF_MIME = "application/jspf+json"
 }
 
 /** Optional backend hook. Implementations are discovered through Java ServiceLoader. */

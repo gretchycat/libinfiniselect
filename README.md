@@ -65,6 +65,38 @@ receiving app to reuse a remote credential. The stream is sequential; a viewer
 that needs positional access must spool the content or use its own seekable
 source adapter. Relay references expire after 24 hours.
 
+## Multiple items and playlists
+
+Multiple selection keeps each item as its own read-only `content://` URI. A
+client can request selections of two or more items as JSPF, with the content
+URIs in each track's `location`:
+
+```kotlin
+InfiniSelect.open(activity, OpenRequest(
+    clientId = "infinimedia",
+    displayName = "InfiniMedia",
+    mimeTypes = listOf("audio/*", "application/xspf+xml", "application/jspf+json"),
+    allowMultiple = true,
+    multipleSelectionDelivery = MultipleSelectionDelivery.JSPF,
+    metadataFormat = SelectionMetadataFormat.XML,
+    allowRecursiveAudioDirectories = true,
+), REQUEST_OPEN)
+```
+
+For one selected item, the result remains that file's content URI. For several
+items, `Intent.data` and `EXTRA_RESULT_PLAYLIST_URI` identify the generated
+JSPF document; `EXTRA_RESULT_URIS` and `ClipData` retain the individual item
+URIs. `EXTRA_RESULT_METADATA_URI` optionally identifies a companion XML
+document with each item's URI, display name, MIME type, and known size. Parse
+either result shape with `InfiniSelect.readResult(context, data)`. Generated
+JSPF and XML documents are served from the consuming app's cache through a
+read-only provider and expire after 24 hours.
+
+`allowRecursiveAudioDirectories` makes a long press on a directory in
+InfiniFolder recursively enumerate supported audio files through its storage
+provider and return them through the same JSPF flow. Symlink directories are
+not followed; unreadable folders and scan limits are reported.
+
 ## Build
 
 From this directory, run `gradle :select-android:assembleRelease`.

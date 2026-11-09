@@ -29,6 +29,11 @@ object FileSelectionContract {
     const val EXTRA_SELECTION_MODE = "io.github.gretchycat.infiniselect.SELECTION_MODE"
     const val EXTRA_SELECTION_RECEIVER = "io.github.gretchycat.infiniselect.SELECTION_RECEIVER"
     const val EXTRA_SELECTION_MIME_TYPES = "io.github.gretchycat.infiniselect.SELECTION_MIME_TYPES"
+    const val EXTRA_MULTIPLE_DELIVERY = "io.github.gretchycat.infiniselect.MULTIPLE_DELIVERY"
+    const val EXTRA_METADATA_FORMAT = "io.github.gretchycat.infiniselect.METADATA_FORMAT"
+    const val EXTRA_ALLOW_RECURSIVE_AUDIO_DIRECTORIES = "io.github.gretchycat.infiniselect.ALLOW_RECURSIVE_AUDIO_DIRECTORIES"
+    const val EXTRA_RESULT_PLAYLIST_URI = "io.github.gretchycat.infiniselect.RESULT_PLAYLIST_URI"
+    const val EXTRA_RESULT_METADATA_URI = "io.github.gretchycat.infiniselect.RESULT_METADATA_URI"
 
     const val RESULT_SELECTED = 1
     const val RESULT_CANCELLED = 0

@@ -9,5 +9,10 @@
             android:excludeFromRecents="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/InfiniSelect.TransparentActivity" />
+        <provider
+            android:name="io.github.gretchycat.infiniselect.SelectionDocumentProvider"
+            android:authorities="${applicationId}.infiniselect.documents"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

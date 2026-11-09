@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.WindowManager
@@ -222,19 +223,71 @@ class FileSelectActivity : Activity() {
     }
 
     private fun returnToCaller(result: Int, data: Intent) {
-        val uri = data.data ?: data.getParcelableExtraCompat(Intent.EXTRA_STREAM)
-        if (uri != null) {
-            val name = data.getStringExtra(FileSelectionContract.EXTRA_RESULT_NAME)
-                ?: data.getStringExtra("displayName") ?: uri.lastPathSegment?.substringAfterLast('/')
-            val mime = data.getStringExtra(FileSelectionContract.EXTRA_RESULT_MIME) ?: data.type
-            data.setDataAndType(uri, mime)
-            if (!name.isNullOrBlank()) data.putExtra("displayName", name)
-            if (!mime.isNullOrBlank()) data.putExtra("mimeType", mime)
-            data.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            if (data.clipData == null) data.clipData = android.content.ClipData.newRawUri(name ?: "document", uri)
+        if (result != RESULT_OK) { setResult(result, data); finish(); return }
+        val items = selectedItems(data)
+        if (items.isEmpty()) { finishWithCancel(); return }
+
+        val playlistUri = if (request.allowMultiple && request.multipleSelectionDelivery == MultipleSelectionDelivery.JSPF && items.size > 1)
+            InfiniSelect.createJspfPlaylist(this, items) else null
+        val metadataUri = if (request.metadataFormat == SelectionMetadataFormat.XML)
+            InfiniSelect.createMetadataXml(this, items) else null
+        val first = items.first()
+        val primary = playlistUri ?: first.uri
+        val primaryMime = if (playlistUri != null) InfiniSelect.JSPF_MIME else first.mimeType
+        data.setDataAndType(primary, primaryMime)
+        data.putExtra(FileSelectionContract.EXTRA_RESULT_URI, first.uri.toString())
+        data.putExtra(FileSelectionContract.EXTRA_RESULT_NAME, first.name)
+        data.putExtra(FileSelectionContract.EXTRA_RESULT_MIME, first.mimeType)
+        data.putExtra(FileSelectionContract.EXTRA_RESULT_SIZE, first.sizeBytes ?: -1L)
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_URIS, ArrayList(items.map { it.uri.toString() }))
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_NAMES, ArrayList(items.map { it.name }))
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_MIMES, ArrayList(items.map { it.mimeType }))
+        data.putExtra(FileSelectionContract.EXTRA_RESULT_SIZES, items.map { it.sizeBytes ?: -1L }.toLongArray())
+        playlistUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_PLAYLIST_URI, it.toString()) }
+        metadataUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_METADATA_URI, it.toString()) }
+        data.putExtra("displayName", if (playlistUri != null) "Selection.jspf" else first.name)
+        data.putExtra("mimeType", primaryMime)
+        data.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        data.clipData = android.content.ClipData.newRawUri(first.name, first.uri).apply {
+            items.drop(1).forEach { addItem(android.content.ClipData.Item(it.uri)) }
+            metadataUri?.let { addItem(android.content.ClipData.Item(it)) }
         }
         setResult(result, data)
         finish()
+    }
+
+    private fun selectedItems(data: Intent): List<SelectionItem> {
+        val uris = data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_URIS)
+            ?.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() }.orEmpty()
+        val candidates = if (uris.isNotEmpty()) uris else buildList {
+            data.data?.let(::add)
+            data.getParcelableExtraCompat(Intent.EXTRA_STREAM)?.let(::add)
+            data.clipData?.let { clip -> for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(::add) }
+        }.distinct()
+        val names = data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_NAMES).orEmpty()
+        val mimes = data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_MIMES).orEmpty()
+        val sizes = data.getLongArrayExtra(FileSelectionContract.EXTRA_RESULT_SIZES)
+        return candidates.mapIndexed { index, uri ->
+            val queried = runCatching {
+                contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+                    ?.use { cursor ->
+                        if (!cursor.moveToFirst()) null to null else {
+                            val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
+                            (nameColumn.takeIf { it >= 0 }?.let(cursor::getString)) to
+                                (sizeColumn.takeIf { it >= 0 }?.let(cursor::getLong)?.takeIf { it >= 0L })
+                        }
+                    } ?: (null to null)
+            }.getOrDefault(null to null)
+            SelectionItem(uri,
+                names.getOrNull(index)?.takeIf(String::isNotBlank) ?: queried.first
+                    ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_NAME)
+                    ?: uri.lastPathSegment?.substringAfterLast('/') ?: "Selected file",
+                mimes.getOrNull(index)?.takeIf(String::isNotBlank)
+                    ?: contentResolver.getType(uri) ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_MIME)
+                    ?: "application/octet-stream",
+                sizes?.getOrNull(index)?.takeIf { it >= 0L } ?: queried.second)
+        }
     }
 
     private fun finishWithCancel() { setResult(RESULT_CANCELED); finish() }
@@ -256,6 +309,16 @@ class FileSelectActivity : Activity() {
             supportedExtensions = getStringArrayListExtra(FileSelectionContract.EXTRA_SUPPORTED_EXTENSIONS).orEmpty(),
             hideUnsupported = getBooleanExtra(FileSelectionContract.EXTRA_HIDE_UNSUPPORTED, false),
             initialScrollY = getIntExtra(FileSelectionContract.EXTRA_INITIAL_SCROLL_Y, 0).coerceAtLeast(0),
+            multipleSelectionDelivery = runCatching {
+                MultipleSelectionDelivery.valueOf(getStringExtra(FileSelectionContract.EXTRA_MULTIPLE_DELIVERY)
+                    ?: MultipleSelectionDelivery.ITEM_URIS.name)
+            }.getOrDefault(MultipleSelectionDelivery.ITEM_URIS),
+            metadataFormat = runCatching {
+                SelectionMetadataFormat.valueOf(getStringExtra(FileSelectionContract.EXTRA_METADATA_FORMAT)
+                    ?: SelectionMetadataFormat.NONE.name)
+            }.getOrDefault(SelectionMetadataFormat.NONE),
+            allowRecursiveAudioDirectories = getBooleanExtra(
+                FileSelectionContract.EXTRA_ALLOW_RECURSIVE_AUDIO_DIRECTORIES, false),
         ) } catch (_: Exception) { null }
     }
 
