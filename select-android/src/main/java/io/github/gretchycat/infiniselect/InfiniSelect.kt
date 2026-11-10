@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.content.Intent
+import android.os.ResultReceiver
 import android.database.Cursor
 import android.provider.OpenableColumns
 
@@ -27,6 +28,8 @@ data class OpenRequest(
     val metadataFormat: SelectionMetadataFormat = SelectionMetadataFormat.NONE,
     /** Let InfiniFolder turn a folder's nested audio files into one playlist. */
     val allowRecursiveAudioDirectories: Boolean = false,
+    /** Receives nonterminal progress while InfiniFolder gathers a recursive selection. */
+    val progressReceiver: ResultReceiver? = null,
 ) {
     init {
         require(clientId.matches(Regex("[A-Za-z0-9._-]{1,80}"))) { "clientId must be a short stable identifier" }
@@ -45,8 +48,41 @@ data class OpenRequest(
         putString(FileSelectionContract.EXTRA_MULTIPLE_DELIVERY, multipleSelectionDelivery.name)
         putString(FileSelectionContract.EXTRA_METADATA_FORMAT, metadataFormat.name)
         putBoolean(FileSelectionContract.EXTRA_ALLOW_RECURSIVE_AUDIO_DIRECTORIES, allowRecursiveAudioDirectories)
+        progressReceiver?.let { putParcelable(FileSelectionContract.EXTRA_PROGRESS_RECEIVER, it) }
         initialDirectory?.let { putParcelable(FileSelectionContract.EXTRA_INITIAL_DIRECTORY, it) }
     }
+}
+
+/** A document to write after the user chooses a destination in InfiniFolder or SAF. */
+data class SaveRequest(
+    val clientId: String,
+    val displayName: String,
+    val fileName: String,
+    val mimeType: String,
+    val sourceUri: Uri,
+    val sourceSizeBytes: Long? = null,
+    val initialDirectory: Uri? = null,
+) {
+    init {
+        require(clientId.matches(Regex("[A-Za-z0-9._-]{1,80}"))) { "clientId must be a short stable identifier" }
+        require(fileName.isNotBlank() && fileName == fileName.substringAfterLast('/') &&
+            fileName !in setOf(".", "..") && !fileName.contains('\\') && !fileName.contains('\u0000')) {
+            "fileName must be a safe leaf name"
+        }
+        require(mimeType.isNotBlank()) { "mimeType is required" }
+        require(sourceSizeBytes == null || sourceSizeBytes >= 0L) { "sourceSizeBytes must be non-negative" }
+    }
+
+    internal fun toIntent(context: Context) = Intent(context, FileSelectActivity::class.java)
+        .setAction(FileSelectActivity.ACTION_SAVE)
+        .putExtra(FileSelectionContract.EXTRA_CLIENT_ID, clientId)
+        .putExtra(FileSelectionContract.EXTRA_DISPLAY_NAME, displayName)
+        .putExtra(FileSelectionContract.EXTRA_SAVE_MODE, true)
+        .putExtra(FileSelectionContract.EXTRA_SAVE_FILE_NAME, fileName)
+        .putExtra(FileSelectionContract.EXTRA_SAVE_MIME_TYPE, mimeType)
+        .putExtra(FileSelectionContract.EXTRA_SAVE_SOURCE_URI, sourceUri)
+        .putExtra(FileSelectionContract.EXTRA_SAVE_SOURCE_SIZE, sourceSizeBytes ?: -1L)
+        .apply { initialDirectory?.let { putExtra(FileSelectionContract.EXTRA_INITIAL_DIRECTORY, it) } }
 }
 
 enum class MultipleSelectionDelivery { ITEM_URIS, JSPF }
@@ -57,6 +93,12 @@ data class SelectionItem(
     val name: String,
     val mimeType: String = "application/octet-stream",
     val sizeBytes: Long? = null,
+    val directoryUri: Uri? = null,
+    val directoryName: String? = null,
+    /** Optional read-granted URI for a sibling directory cover image. */
+    val directoryCoverUri: Uri? = null,
+    /** True when recursive selection checked the directory for an image URI. */
+    val directoryArtworkMetadataResolved: Boolean = false,
 )
 
 data class SelectionResult(
@@ -81,6 +123,18 @@ object InfiniSelect {
         )
     }
 
+    /** Ask InfiniFolder to choose and write into a storage-provider location, falling back to SAF. */
+    fun save(activity: Activity, request: SaveRequest, requestCode: Int) {
+        val effective = if (request.initialDirectory == null) {
+            request.copy(initialDirectory = defaultDirectory(activity, request.clientId))
+        } else request
+        activity.startActivityForResult(effective.toIntent(activity), requestCode)
+    }
+
+    /** Publish bytes as a short-lived readable source for [save]. */
+    fun createDocument(context: Context, name: String, mimeType: String, contents: ByteArray): Uri =
+        SelectionDocumentProvider.create(context, name, mimeType, contents)
+
     fun defaultDirectory(context: Context, clientId: String): Uri? =
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             .getString(DIRECTORY_PREFIX + clientId, null)?.let(Uri::parse)
@@ -101,6 +155,9 @@ object InfiniSelect {
         val names = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_NAMES).orEmpty()
         val mimes = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_MIMES).orEmpty()
         val sizes = intent.getLongArrayExtra(FileSelectionContract.EXTRA_RESULT_SIZES)
+        val directoryUris = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS).orEmpty()
+        val directoryNames = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES).orEmpty()
+        val directoryCoverUris = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS).orEmpty()
         val itemUris = if (uris.isNotEmpty()) uris else buildList {
             intent.data?.let { add(it) }
             intent.clipData?.let { clip ->
@@ -108,13 +165,22 @@ object InfiniSelect {
             }
         }.distinct()
         val items = itemUris.mapIndexed { index, uri ->
-            val queried = queryItem(context, uri)
+            val suppliedName = names.getOrNull(index)?.takeIf(String::isNotBlank)
+            val suppliedMime = mimes.getOrNull(index)?.takeIf(String::isNotBlank)
+            val hasSuppliedSize = sizes?.getOrNull(index) != null
+            val suppliedSize = sizes?.getOrNull(index)?.takeIf { it >= 0L }
+            val queried = if (suppliedName == null || suppliedMime == null || !hasSuppliedSize)
+                queryItem(context, uri) else null to null
             SelectionItem(
                 uri = uri,
-                name = names.getOrNull(index)?.takeIf(String::isNotBlank) ?: queried.first ?: uri.lastPathSegment.orEmpty(),
-                mimeType = mimes.getOrNull(index)?.takeIf(String::isNotBlank)
+                name = suppliedName ?: queried.first ?: uri.lastPathSegment.orEmpty(),
+                mimeType = suppliedMime
                     ?: context.contentResolver.getType(uri) ?: "application/octet-stream",
-                sizeBytes = sizes?.getOrNull(index)?.takeIf { it >= 0L } ?: queried.second,
+                sizeBytes = suppliedSize ?: queried.second,
+                directoryUri = directoryUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
+                directoryName = directoryNames.getOrNull(index)?.takeIf(String::isNotBlank),
+                directoryCoverUri = directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
+                directoryArtworkMetadataResolved = directoryUris.getOrNull(index)?.isNotBlank() == true,
             )
         }
         val playlist = intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_PLAYLIST_URI)
@@ -134,7 +200,11 @@ object InfiniSelect {
                 .put("title", item.name)
                 .put("extension", org.json.JSONObject().put("io.github.gretchycat.infiniselect", org.json.JSONObject()
                     .put("mimeType", item.mimeType)
-                    .put("sizeBytes", item.sizeBytes ?: org.json.JSONObject.NULL)))
+                    .put("sizeBytes", item.sizeBytes ?: org.json.JSONObject.NULL)
+                    .put("directoryUri", item.directoryUri?.toString() ?: org.json.JSONObject.NULL)
+                    .put("directoryName", item.directoryName ?: org.json.JSONObject.NULL)
+                    .put("directoryCoverUri", item.directoryCoverUri?.toString() ?: org.json.JSONObject.NULL)
+                    .put("directoryArtworkMetadataResolved", item.directoryArtworkMetadataResolved)))
             tracks.put(fields)
         }
         val json = org.json.JSONObject().put("playlist", org.json.JSONObject()

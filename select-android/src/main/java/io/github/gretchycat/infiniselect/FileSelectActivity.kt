@@ -24,6 +24,7 @@ import android.widget.TextView
 /** Chooses InfiniFolder when installed, otherwise presents SAF and installed source hooks. */
 class FileSelectActivity : Activity() {
     private lateinit var request: OpenRequest
+    private var saveRequest: SaveRequest? = null
     private var waitingForInfiniFolder = false
     private var inSourceChooser = false
     private var sourceMessage: String? = null
@@ -35,8 +36,52 @@ class FileSelectActivity : Activity() {
         // non-interactive while the overlay is loading.
         window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-        request = intent.toRequest() ?: run { finish(); return }
-        startPreferredSource()
+        if (intent.action == ACTION_SAVE) {
+            saveRequest = intent.toSaveRequest() ?: run { finish(); return }
+            startPreferredSaveSource()
+        } else {
+            request = intent.toRequest() ?: run { finish(); return }
+            startPreferredSource()
+        }
+    }
+
+    private fun startPreferredSaveSource() {
+        val request = saveRequest ?: run { finish(); return }
+        if (isInfiniFolderInstalled()) {
+            val source = Intent(FileSelectionContract.ACTION_SAVE)
+                .setPackage(INFINIFOLDER_PACKAGE)
+                .putExtra(FileSelectionContract.EXTRA_CLIENT_ID, request.clientId)
+                .putExtra(FileSelectionContract.EXTRA_DISPLAY_NAME, request.displayName)
+                .putExtra(FileSelectionContract.EXTRA_SAVE_MODE, true)
+                .putExtra(FileSelectionContract.EXTRA_SAVE_FILE_NAME, request.fileName)
+                .putExtra(FileSelectionContract.EXTRA_SAVE_MIME_TYPE, request.mimeType)
+                .putExtra(FileSelectionContract.EXTRA_SAVE_SOURCE_URI, request.sourceUri)
+                .putExtra(FileSelectionContract.EXTRA_SAVE_SOURCE_SIZE, request.sourceSizeBytes ?: -1L)
+                .apply {
+                    request.initialDirectory?.let { putExtra(FileSelectionContract.EXTRA_INITIAL_DIRECTORY, it) }
+                    clipData = android.content.ClipData.newRawUri(request.fileName, request.sourceUri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            try {
+                startActivityForResult(source, REQUEST_INFINIFOLDER_SAVE)
+                return
+            } catch (_: Exception) { }
+        }
+        launchSafSavePicker()
+    }
+
+    private fun launchSafSavePicker() {
+        val request = saveRequest ?: run { finish(); return }
+        val picker = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = request.mimeType
+            putExtra(Intent.EXTRA_TITLE, request.fileName)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            request.initialDirectory?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
+        }
+        runCatching { startActivityForResult(picker, REQUEST_SAF_SAVE) }
+            .onFailure { finishSaveFailure("No file picker is available: ${it.message ?: "unavailable"}") }
     }
 
     private fun startPreferredSource() {
@@ -44,6 +89,9 @@ class FileSelectActivity : Activity() {
             val selection = Intent(FileSelectionContract.ACTION_SELECT)
                 .setPackage(INFINIFOLDER_PACKAGE)
                 .putExtras(request.toBundle())
+                // InfiniFolder completes selection through a ResultReceiver, so
+                // Activity.getCallingPackage() is not reliable in its adapter.
+                .putExtra(FileSelectionContract.EXTRA_REQUESTING_PACKAGE, packageName)
             waitingForInfiniFolder = true
             try {
                 startActivityForResult(selection, REQUEST_INFINIFOLDER)
@@ -186,14 +234,24 @@ class FileSelectActivity : Activity() {
         when (requestCode) {
             REQUEST_INFINIFOLDER -> {
                 waitingForInfiniFolder = false
+                data?.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)?.let { value ->
+                    rememberDefaultDirectory(request.clientId, value)
+                }
                 if (resultCode == RESULT_OK && data != null) {
                     if (data.getBooleanExtra(FileSelectionContract.EXTRA_FALLBACK_TO_SOURCES, false)) {
                         sourceMessage = data.getStringExtra(FileSelectionContract.EXTRA_FAILURE_MESSAGE)
                         showSourceChooser()
-                    } else returnToCaller(resultCode, data)
+                    } else {
+                        // InfiniFolder returns relay URIs in ClipData. Retain
+                        // those grants before forwarding the normalized
+                        // playlist result to the calling viewer.
+                        retainGrant(data)
+                        returnToCaller(resultCode, data)
+                    }
                 } else finishWithCancel()
             }
             REQUEST_SAF, REQUEST_BACKEND -> if (resultCode == RESULT_OK && data != null) {
+                rememberDirectoryFromResult(request.clientId, data)
                 retainGrant(data)
                 returnToCaller(resultCode, data)
             } else if (inSourceChooser) {
@@ -209,11 +267,107 @@ class FileSelectActivity : Activity() {
                 }
                 showSourceChooser()
             }
+            REQUEST_INFINIFOLDER_SAVE -> {
+                data?.let { result ->
+                    val directory = result.getStringExtra(FileSelectionContract.EXTRA_SAVE_DIRECTORY)
+                        ?: result.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)
+                    directory?.let { rememberDefaultDirectory(saveRequest?.clientId, it) }
+                }
+                if (resultCode == RESULT_OK && data?.getBooleanExtra(FileSelectionContract.EXTRA_SAVE_SUCCESS, false) == true) {
+                    setResult(RESULT_OK, data)
+                    finish()
+                } else if (data?.getBooleanExtra(FileSelectionContract.EXTRA_FALLBACK_TO_SOURCES, false) == true) {
+                    launchSafSavePicker()
+                } else if (resultCode == RESULT_OK) {
+                    launchSafSavePicker()
+                } else finishWithCancel()
+            }
+            REQUEST_SAF_SAVE -> {
+                if (resultCode != RESULT_OK || data?.data == null) { finishWithCancel(); return }
+                copySaveSourceTo(data.data!!, saveRequest?.clientId)
+            }
         }
     }
 
+    private fun copySaveSourceTo(destination: Uri, clientId: String?) {
+        val request = saveRequest ?: run { finish(); return }
+        Thread({
+            var copied = false
+            val result = runCatching {
+                val input = contentResolver.openInputStream(request.sourceUri)
+                    ?: error("The playlist data could not be opened")
+                val output = contentResolver.openOutputStream(destination, "wt")
+                    ?: error("The selected destination could not be opened")
+                var written = 0L
+                input.use { source -> output.use { target ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = source.read(buffer)
+                        if (count < 0) break
+                        target.write(buffer, 0, count)
+                        written += count
+                    }
+                } }
+                if (request.sourceSizeBytes != null && written != request.sourceSizeBytes) {
+                    error("Saved size did not match the playlist data")
+                }
+                copied = true
+            }
+            runOnUiThread {
+                if (result.isSuccess) {
+                    val directory = directoryForDocument(destination)
+                    directory?.let { rememberDefaultDirectory(clientId, it.toString()) }
+                    finishSaveSuccess(destination, request.fileName, directory)
+                }
+                else {
+                    if (!copied) runCatching { DocumentsContract.deleteDocument(contentResolver, destination) }
+                    finishSaveFailure("Could not save document: ${result.exceptionOrNull()?.message ?: "write failed"}")
+                }
+            }
+        }, "InfiniSelectSafSave").start()
+    }
+
+    private fun finishSaveSuccess(uri: Uri, name: String, directory: Uri?) {
+        setResult(RESULT_OK, Intent().setDataAndType(uri, saveRequest?.mimeType).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            putExtra(FileSelectionContract.EXTRA_SAVE_SUCCESS, true)
+            putExtra(FileSelectionContract.EXTRA_SAVE_RESULT_NAME, name)
+            directory?.let { putExtra(FileSelectionContract.EXTRA_SAVE_DIRECTORY, it.toString()) }
+        })
+        finish()
+    }
+
+    private fun rememberDirectoryFromResult(clientId: String, data: Intent) {
+        val explicit = data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)?.let(Uri::parse)
+        val directory = explicit ?: data.data?.let(::directoryForDocument)
+        directory?.let { InfiniSelect.setDefaultDirectory(this, clientId, it) }
+    }
+
+    private fun rememberDefaultDirectory(clientId: String?, value: String) {
+        val directory = runCatching { Uri.parse(value) }.getOrNull() ?: return
+        clientId?.let { id -> runCatching { InfiniSelect.setDefaultDirectory(this, id, directory) } }
+    }
+
+    /** Return the containing document URI so SAF opens in the folder last used. */
+    private fun directoryForDocument(uri: Uri): Uri? = runCatching {
+        if (!DocumentsContract.isDocumentUri(this, uri)) return@runCatching null
+        val documentId = DocumentsContract.getDocumentId(uri)
+        val parentId = documentId.substringBeforeLast('/', missingDelimiterValue = "")
+        if (parentId.isBlank()) null else DocumentsContract.buildDocumentUri(uri.authority, parentId)
+    }.getOrNull()
+
+    private fun finishSaveFailure(message: String) {
+        setResult(RESULT_CANCELED, Intent().putExtra(FileSelectionContract.EXTRA_SAVE_ERROR, message))
+        finish()
+    }
+
     private fun retainGrant(data: Intent) {
+        // Only SAF results can grant persistable access. InfiniFolder relays are
+        // temporary grants; trying one persistable-grant Binder call per item
+        // needlessly stalls large playlist handoffs.
+        if (data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION == 0) return
         val flags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        if (flags == 0) return
         val uris = linkedSetOf<Uri>()
         data.data?.let(uris::add)
         data.clipData?.let { clip ->
@@ -234,6 +388,31 @@ class FileSelectActivity : Activity() {
         val first = items.first()
         val primary = playlistUri ?: first.uri
         val primaryMime = if (playlistUri != null) InfiniSelect.JSPF_MIME else first.mimeType
+        // The picker may return cross-app content URIs (for example, InfiniFolder
+        // relay URIs). Re-grant every selected URI to our caller before forwarding
+        // them in ClipData; otherwise Android can reject finish() while delivering
+        // a multi-item result, crashing the picker and dropping the selection.
+        val recipientPackage = callingPackage ?: callingActivity?.packageName
+        if (recipientPackage != null && recipientPackage != packageName) {
+            val forwardedUris = buildList {
+                add(primary)
+                items.forEach { add(it.uri) }
+                items.mapNotNullTo(this) { it.directoryCoverUri }
+                metadataUri?.let(::add)
+            }.distinct()
+            runCatching {
+                forwardedUris.forEach { uri ->
+                    grantUriPermission(recipientPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            }.onFailure { error ->
+                setResult(RESULT_CANCELED, Intent().putExtra(
+                    FileSelectionContract.EXTRA_FAILURE_MESSAGE,
+                    error.message ?: "Could not grant access to the selected files"
+                ))
+                finish()
+                return
+            }
+        }
         data.setDataAndType(primary, primaryMime)
         data.putExtra(FileSelectionContract.EXTRA_RESULT_URI, first.uri.toString())
         data.putExtra(FileSelectionContract.EXTRA_RESULT_NAME, first.name)
@@ -243,14 +422,34 @@ class FileSelectActivity : Activity() {
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_NAMES, ArrayList(items.map { it.name }))
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_MIMES, ArrayList(items.map { it.mimeType }))
         data.putExtra(FileSelectionContract.EXTRA_RESULT_SIZES, items.map { it.sizeBytes ?: -1L }.toLongArray())
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS,
+            ArrayList(items.map { it.directoryUri?.toString().orEmpty() }))
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES,
+            ArrayList(items.map { it.directoryName.orEmpty() }))
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS,
+            ArrayList(items.map { it.directoryCoverUri?.toString().orEmpty() }))
         playlistUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_PLAYLIST_URI, it.toString()) }
         metadataUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_METADATA_URI, it.toString()) }
         data.putExtra("displayName", if (playlistUri != null) "Selection.jspf" else first.name)
         data.putExtra("mimeType", primaryMime)
-        data.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        data.clipData = android.content.ClipData.newRawUri(first.name, first.uri).apply {
-            items.drop(1).forEach { addItem(android.content.ClipData.Item(it.uri)) }
-            metadataUri?.let { addItem(android.content.ClipData.Item(it)) }
+        // Consumers may keep a working queue beyond this Activity's lifetime.
+        // Providers that support persisted URI grants can then let them retain
+        // access; unsupported providers simply reject takePersistableUriPermission.
+        val persistableGrant = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+        data.flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or persistableGrant
+        val clipUris = if (playlistUri != null) {
+            // The JSPF holds the individual file and cover-image URI metadata.
+            // The app grants those directly, so only return the compact playlist
+            // document in ClipData instead of hundreds of duplicate grant items.
+            listOfNotNull(primary, metadataUri)
+        } else buildList {
+            addAll(items.map { it.uri })
+            addAll(items.mapNotNull { it.directoryCoverUri }.distinct())
+            metadataUri?.let(::add)
+        }.distinct()
+        data.clipData = android.content.ClipData.newRawUri(
+            if (playlistUri != null) "Selection.jspf" else first.name, clipUris.first()).apply {
+            clipUris.drop(1).forEach { addItem(android.content.ClipData.Item(it)) }
         }
         setResult(result, data)
         finish()
@@ -267,8 +466,15 @@ class FileSelectActivity : Activity() {
         val names = data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_NAMES).orEmpty()
         val mimes = data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_MIMES).orEmpty()
         val sizes = data.getLongArrayExtra(FileSelectionContract.EXTRA_RESULT_SIZES)
+        val directoryUris = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS).orEmpty()
+        val directoryNames = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES).orEmpty()
+        val directoryCoverUris = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS).orEmpty()
         return candidates.mapIndexed { index, uri ->
-            val queried = runCatching {
+            val suppliedName = names.getOrNull(index)?.takeIf(String::isNotBlank)
+            val suppliedMime = mimes.getOrNull(index)?.takeIf(String::isNotBlank)
+            val hasSuppliedSize = sizes?.getOrNull(index) != null
+            val suppliedSize = sizes?.getOrNull(index)?.takeIf { it >= 0L }
+            val queried = if (suppliedName == null || suppliedMime == null || !hasSuppliedSize) runCatching {
                 contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
                     ?.use { cursor ->
                         if (!cursor.moveToFirst()) null to null else {
@@ -278,15 +484,19 @@ class FileSelectActivity : Activity() {
                                 (sizeColumn.takeIf { it >= 0 }?.let(cursor::getLong)?.takeIf { it >= 0L })
                         }
                     } ?: (null to null)
-            }.getOrDefault(null to null)
+            }.getOrDefault(null to null) else null to null
             SelectionItem(uri,
-                names.getOrNull(index)?.takeIf(String::isNotBlank) ?: queried.first
+                suppliedName ?: queried.first
                     ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_NAME)
                     ?: uri.lastPathSegment?.substringAfterLast('/') ?: "Selected file",
-                mimes.getOrNull(index)?.takeIf(String::isNotBlank)
+                suppliedMime
                     ?: contentResolver.getType(uri) ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_MIME)
                     ?: "application/octet-stream",
-                sizes?.getOrNull(index)?.takeIf { it >= 0L } ?: queried.second)
+                suppliedSize ?: queried.second,
+                directoryUri = directoryUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
+                directoryName = directoryNames.getOrNull(index)?.takeIf(String::isNotBlank),
+                directoryCoverUri = directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
+                directoryArtworkMetadataResolved = directoryUris.getOrNull(index)?.isNotBlank() == true)
         }
     }
 
@@ -319,18 +529,40 @@ class FileSelectActivity : Activity() {
             }.getOrDefault(SelectionMetadataFormat.NONE),
             allowRecursiveAudioDirectories = getBooleanExtra(
                 FileSelectionContract.EXTRA_ALLOW_RECURSIVE_AUDIO_DIRECTORIES, false),
+            progressReceiver = getParcelableResultReceiver(FileSelectionContract.EXTRA_PROGRESS_RECEIVER),
         ) } catch (_: Exception) { null }
+    }
+
+    private fun Intent.toSaveRequest(): SaveRequest? {
+        val clientId = getStringExtra(FileSelectionContract.EXTRA_CLIENT_ID) ?: return null
+        val source = getParcelableExtraCompat(FileSelectionContract.EXTRA_SAVE_SOURCE_URI) ?: return null
+        return runCatching { SaveRequest(
+            clientId = clientId,
+            displayName = getStringExtra(FileSelectionContract.EXTRA_DISPLAY_NAME) ?: applicationInfo.loadLabel(packageManager).toString(),
+            fileName = getStringExtra(FileSelectionContract.EXTRA_SAVE_FILE_NAME) ?: return null,
+            mimeType = getStringExtra(FileSelectionContract.EXTRA_SAVE_MIME_TYPE) ?: "application/octet-stream",
+            sourceUri = source,
+            sourceSizeBytes = getLongExtra(FileSelectionContract.EXTRA_SAVE_SOURCE_SIZE, -1L).takeIf { it >= 0L },
+            initialDirectory = getParcelableExtraCompat(FileSelectionContract.EXTRA_INITIAL_DIRECTORY),
+        ) }.getOrNull()
     }
 
     private fun Intent.getParcelableExtraCompat(key: String): Uri? =
         if (Build.VERSION.SDK_INT >= 33) getParcelableExtra(key, Uri::class.java)
         else @Suppress("DEPRECATION") (getParcelableExtra(key) as? Uri)
 
+    private fun Intent.getParcelableResultReceiver(key: String): android.os.ResultReceiver? =
+        if (Build.VERSION.SDK_INT >= 33) getParcelableExtra(key, android.os.ResultReceiver::class.java)
+        else @Suppress("DEPRECATION") (getParcelableExtra(key) as? android.os.ResultReceiver)
+
     companion object {
+        const val ACTION_SAVE = "io.github.gretchycat.infiniselect.internal.SAVE"
         private const val INFINIFOLDER_PACKAGE = "com.infinifolder"
         private const val REQUEST_INFINIFOLDER = 4101
         private const val REQUEST_SAF = 4102
         private const val REQUEST_DEFAULT_DIRECTORY = 4103
         private const val REQUEST_BACKEND = 4104
+        private const val REQUEST_INFINIFOLDER_SAVE = 4105
+        private const val REQUEST_SAF_SAVE = 4106
     }
 }

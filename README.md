@@ -41,7 +41,24 @@ the Android SAF fallback.
 `InfiniSelect.defaultDirectory(context, clientId)` and
 `InfiniSelect.setDefaultDirectory(context, clientId, uri)` store starting
 folders in the consuming app's private preferences, partitioned by viewer ID.
-The fallback screen also lets a user choose that viewer's default folder.
+The fallback screen also lets a user choose that viewer's default folder. A
+successful selection updates the viewer's starting folder to the directory it
+came from; dismissing the InfiniFolder picker after navigating saves the last
+directory reached. Saving uses the same per-viewer folder and updates it after
+choosing a destination, so load and save resume in the most recently used
+location across launches.
+
+## Saving documents
+
+Use `InfiniSelect.save(activity, SaveRequest(...), requestCode)` to let the user
+choose a destination for a document the viewer has generated. Publish its bytes
+with `InfiniSelect.createDocument(...)` and pass the resulting source URI and
+size in the request. When InfiniFolder is installed, it opens its floating
+browser and writes into the selected storage location. Existing files are kept;
+a numbered filename is selected if the requested name already exists. If
+InfiniFolder is unavailable or cannot open its picker, the library falls back
+to Android's `ACTION_CREATE_DOCUMENT` flow. A successful result includes
+`FileSelectionContract.EXTRA_SAVE_SUCCESS` and the actual saved name.
 
 `FileSourceBackend` is the extension point for additional loading systems. It
 provides an availability check, a visible label/order, and an Intent factory.
@@ -95,7 +112,22 @@ read-only provider and expire after 24 hours.
 `allowRecursiveAudioDirectories` makes a long press on a directory in
 InfiniFolder recursively enumerate supported audio files through its storage
 provider and return them through the same JSPF flow. Symlink directories are
-not followed; unreadable folders and scan limits are reported.
+not followed; unreadable folders and scan limits are reported. An optional
+`OpenRequest.progressReceiver` receives `RESULT_LOADING_STARTED`,
+`RESULT_LOADING_PROGRESS`, and `RESULT_LOADING_FAILED` while the selector
+closes and the enumeration continues. Each result includes a human-readable
+progress label and folder/track counts. Selected items also include their
+parent directory URI and display name in `SelectionItem`, the parallel
+`EXTRA_ITEM_DIRECTORY_URIS` / `EXTRA_ITEM_DIRECTORY_NAMES` arrays, and the
+generated JSPF InfiniSelect extension fields. This lets clients retain
+directory grouping and artwork context without rescanning the hierarchy.
+For recursive selections, InfiniFolder also attaches a read-granted URI to the
+first readable `cover.*` image in each directory. It passes the URI through
+`SelectionItem.directoryCoverUri` and the JSPF `directoryCoverUri` extension,
+along with `directoryArtworkMetadataResolved`. The playlist stores the cover as
+a URI only, never image bytes. Viewers can show a folder icon immediately and
+load the image during their background metadata pass; directories without a
+cover keep the folder icon without repeating the lookup for every track.
 
 ## Build
 
