@@ -1,12 +1,17 @@
 package io.github.gretchycat.infiniselect
 
 import android.content.Intent
-import android.test.AndroidTestCase
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.Assert.*
 
 /** Runs against Android's actual resolver and descriptor APIs; compilation alone is not execution. */
-@Suppress("DEPRECATION")
-class StorageAccessDeviceTest : AndroidTestCase() {
-    fun testSelectionDocumentCanBeReopenedAndSeekedWithoutStaging() {
+@RunWith(AndroidJUnit4::class)
+class StorageAccessDeviceTest {
+    private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
+    @Test fun testSelectionDocumentCanBeReopenedAndSeekedWithoutStaging() {
         val bytes = byteArrayOf(11, 22, 33, 44)
         val uri = InfiniSelect.createDocument(context, "sample.bin", "application/octet-stream", bytes)
         StorageAccess.openRead(context, uri).use { assertTrue(bytes.contentEquals(it.readBytes())) }
@@ -18,13 +23,13 @@ class StorageAccessDeviceTest : AndroidTestCase() {
             assertEquals(33, result[0].toInt())
         }
     }
-    fun testDirectoryRequestUsesAndroidTreeGrantFlags() {
+    @Test fun testDirectoryRequestUsesAndroidTreeGrantFlags() {
         val intent = StorageAccess.directoryIntent(context, writable = true)
         assertEquals(Intent.ACTION_OPEN_DOCUMENT_TREE, intent.action)
         assertTrue(intent.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0)
         assertTrue(intent.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0)
     }
-    fun testTemporarySelectionIsNotPersisted() {
+    @Test fun testTemporarySelectionIsNotPersisted() {
         val uri = InfiniSelect.createDocument(context, "temporary", "application/octet-stream", byteArrayOf(1))
         assertFalse(StorageAccess.persist(context, Intent().setData(uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)))
     }

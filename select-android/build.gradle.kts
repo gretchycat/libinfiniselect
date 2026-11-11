@@ -6,10 +6,15 @@ plugins {
 android {
     namespace = "io.github.gretchycat.infiniselect"
     compileSdk = 36
-    defaultConfig { minSdk = 26; testInstrumentationRunner = "android.test.InstrumentationTestRunner" }
+    defaultConfig { minSdk = 26; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

@@ -26,7 +26,7 @@ jobs:
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           cmdline-tools-version: '15859902'
-          packages: 'platform-tools platforms;android-36 build-tools;35.0.0 ndk;27.2.12479018 cmake;3.22.1'
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
       - name: Fetch only declared source dependencies
         run: |
           python3 scripts/fetch-dependencies.py
