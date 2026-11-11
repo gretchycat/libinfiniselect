@@ -169,3 +169,12 @@ Android DocumentsContract/ContentResolver APIs support tree traversal, child
 creation and other provider operations. Unsupported operations fail explicitly.
 The compatibility JSPF/XML result serializers encode selection references only;
 media decoding and metadata extraction are outside this library.
+
+Saved-document results also use Android content references and preserve the actual
+read/write/persist flags. Infinifolder's save adapter verifies the framework caller
+and its source access before reading. On Android 8–14, publish generated content
+from a provider owned by the caller or pass a document with an explicit URI grant;
+provider-wide access alone is insufficient for a cross-application permission
+check. Newer Android versions additionally expose a full content permission check.
+Capability metadata distinguishes an already persisted grant (`persisted`) from
+seek support, which is probed on the actual open descriptor.

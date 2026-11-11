@@ -291,12 +291,13 @@ class FileSelectActivity : Activity() {
             }
             REQUEST_SAF_SAVE -> {
                 if (resultCode != RESULT_OK || data?.data == null) { finishWithCancel(); return }
-                copySaveSourceTo(data.data!!, saveRequest?.clientId)
+                retainGrant(data)
+                copySaveSourceTo(data.data!!, saveRequest?.clientId, data.flags)
             }
         }
     }
 
-    private fun copySaveSourceTo(destination: Uri, clientId: String?) {
+    private fun copySaveSourceTo(destination: Uri, clientId: String?, grantFlags: Int) {
         val request = saveRequest ?: run { finish(); return }
         Thread({
             var copied = false
@@ -324,7 +325,7 @@ class FileSelectActivity : Activity() {
                 if (result.isSuccess) {
                     val directory = directoryForDocument(destination)
                     directory?.let { rememberDefaultDirectory(clientId, it.toString()) }
-                    finishSaveSuccess(destination, request.fileName, directory)
+                    finishSaveSuccess(destination, request.fileName, directory, grantFlags)
                 }
                 else {
                     if (!copied) runCatching { DocumentsContract.deleteDocument(contentResolver, destination) }
@@ -334,9 +335,11 @@ class FileSelectActivity : Activity() {
         }, "InfiniSelectSafSave").start()
     }
 
-    private fun finishSaveSuccess(uri: Uri, name: String, directory: Uri?) {
+    private fun finishSaveSuccess(uri: Uri, name: String, directory: Uri?, grantFlags: Int) {
         setResult(RESULT_OK, Intent().setDataAndType(uri, saveRequest?.mimeType).apply {
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(grantFlags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION))
+            clipData = android.content.ClipData.newRawUri(name, uri)
             putExtra(FileSelectionContract.EXTRA_SAVE_SUCCESS, true)
             putExtra(FileSelectionContract.EXTRA_SAVE_RESULT_NAME, name)
             directory?.let { putExtra(FileSelectionContract.EXTRA_SAVE_DIRECTORY, it.toString()) }

@@ -12,7 +12,7 @@ import java.io.FileNotFoundException
 object StorageAccess {
     enum class Support { SUPPORTED, UNSUPPORTED, UNKNOWN }
     data class Capabilities(val readable: Support, val writable: Support, val directory: Boolean,
-        val seekable: Support = Support.UNKNOWN, val persistable: Boolean = false)
+        val seekable: Support = Support.UNKNOWN, val persisted: Boolean = false)
 
     fun openRead(context: Context, uri: Uri): java.io.InputStream =
         context.contentResolver.openInputStream(uri) ?: throw FileNotFoundException("Provider returned no readable stream")
@@ -47,7 +47,7 @@ object StorageAccess {
             Intent.FLAG_GRANT_READ_URI_PERMISSION) == android.content.pm.PackageManager.PERMISSION_GRANTED
         return Capabilities(if (readGranted) Support.SUPPORTED else Support.UNKNOWN,
             if (flags == null) Support.UNKNOWN else if (flags and DocumentsContract.Document.FLAG_SUPPORTS_WRITE != 0)
-                Support.SUPPORTED else Support.UNSUPPORTED, directory, persistable = persisted)
+                Support.SUPPORTED else Support.UNSUPPORTED, directory, persisted = persisted)
     }
 
     /** Request a grantable tree, preferring Infinifolder's standard provider when installed. */
