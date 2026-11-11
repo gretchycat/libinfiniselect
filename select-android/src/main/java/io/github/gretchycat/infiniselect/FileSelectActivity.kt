@@ -85,6 +85,10 @@ class FileSelectActivity : Activity() {
     }
 
     private fun startPreferredSource() {
+        if (intent.getBooleanExtra("io.github.gretchycat.infiniselect.WRITABLE", false)) {
+            launchSafPicker()
+            return
+        }
         if (isInfiniFolderInstalled()) {
             val selection = Intent(FileSelectionContract.ACTION_SELECT)
                 .setPackage(INFINIFOLDER_PACKAGE)
@@ -212,7 +216,10 @@ class FileSelectActivity : Activity() {
             if (types.size > 1) putExtra(Intent.EXTRA_MIME_TYPES, types)
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, request.allowMultiple)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-            request.initialDirectory?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
+            if (intent.getBooleanExtra("io.github.gretchycat.infiniselect.WRITABLE", false)) addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            val initial = request.initialDirectory ?: packageManager.resolveContentProvider("com.infinifolder.documents", 0)
+                ?.let { DocumentsContract.buildDocumentUri(it.authority, "root") }
+            initial?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
         }
         runCatching { startActivityForResult(picker, REQUEST_SAF) }
             .onFailure { showMessage("Android's file picker is unavailable: ${it.message ?: "no picker app"}") }
@@ -436,7 +443,8 @@ class FileSelectActivity : Activity() {
         // Providers that support persisted URI grants can then let them retain
         // access; unsupported providers simply reject takePersistableUriPermission.
         val persistableGrant = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-        data.flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or persistableGrant
+        data.flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or persistableGrant or
+            (data.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         val clipUris = if (playlistUri != null) {
             // The JSPF holds the individual file and cover-image URI metadata.
             // The app grants those directly, so only return the compact playlist

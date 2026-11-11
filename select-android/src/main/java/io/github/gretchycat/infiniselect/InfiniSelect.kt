@@ -30,6 +30,8 @@ data class OpenRequest(
     val allowRecursiveAudioDirectories: Boolean = false,
     /** Receives nonterminal progress while InfiniFolder gathers a recursive selection. */
     val progressReceiver: ResultReceiver? = null,
+    /** Request an editable Android document instead of a temporary read relay. */
+    val writable: Boolean = false,
 ) {
     init {
         require(clientId.matches(Regex("[A-Za-z0-9._-]{1,80}"))) { "clientId must be a short stable identifier" }
@@ -41,6 +43,7 @@ data class OpenRequest(
         putString(FileSelectionContract.EXTRA_CLIENT_ID, clientId)
         putString(FileSelectionContract.EXTRA_DISPLAY_NAME, displayName)
         putStringArrayList(FileSelectionContract.EXTRA_MIME_TYPES, ArrayList(mimeTypes))
+        putBoolean("io.github.gretchycat.infiniselect.WRITABLE", writable)
         putBoolean(FileSelectionContract.EXTRA_ALLOW_MULTIPLE, allowMultiple)
         putStringArrayList(FileSelectionContract.EXTRA_SUPPORTED_EXTENSIONS, ArrayList(supportedExtensions))
         putBoolean(FileSelectionContract.EXTRA_HIDE_UNSUPPORTED, hideUnsupported)

@@ -46,6 +46,7 @@ class SelectionDocumentProvider : ContentProvider() {
         val context = context ?: return null
         if (uri.authority != authority(context) || uri.pathSegments.size != 1) return null
         val token = uri.lastPathSegment ?: return null
+        if (!token.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))) return null
         val prefs = context.getSharedPreferences(PREFS, 0)
         val issued = prefs.getLong("$token.issued", 0L)
         val file = File(context.cacheDir, "$DIRECTORY/$token")

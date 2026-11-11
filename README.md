@@ -131,6 +131,41 @@ cover keep the folder icon without repeating the lookup for every track.
 
 ## Build
 
-From this directory, run `gradle :select-android:assembleRelease`.
+Install JDK 17 or 21, Python 3 and Android SDK platform 36/build tools 35.0.0.
+Set `ANDROID_HOME` or this checkout's `local.properties`, then run:
+
+```sh
+python3 scripts/fetch-dependencies.py
+./gradlew :select-android:assembleDebug :select-android:testDebugUnitTest
+```
+
+There are no InfiniSuite dependencies. No parent or sibling checkout is read.
 
 See [LICENSE.md](LICENSE.md) for the current license status.
+
+## Android storage contract
+
+`StorageAccess.selectDirectory` requests a standard `ACTION_OPEN_DOCUMENT_TREE`
+result, preferring Infinifolder's DocumentsProvider when available. `OpenRequest`
+with `writable = true` requests a standard editable document. Read-only requests
+retain the floating picker for compatibility. Both routes work with Android SAF
+when Infinifolder is absent or unavailable. The provider authority is
+`com.infinifolder.documents`; document IDs are opaque and must not be decoded.
+
+Use `StorageAccess.openRead`, `openWrite`, or `openDescriptor`. The caller owns
+and closes every handle. `seekable(descriptor)` probes the handle without copying
+its contents; unsupported seeking remains explicit. `capabilities` returns
+unknown where Android metadata cannot promise a feature. An advertised capability
+does not replace the access check performed by the actual open operation.
+
+`StorageAccess.persist(context, result)` persists only flags Android actually
+granted. Temporary floating-picker relay URIs expire after 24 hours and cannot
+be persisted. SAF document/tree references last until revoked by the user or
+provider; network credentials remain private to Infinifolder. Neither route
+materializes a complete file merely to provide a URI. A decoder that requires a
+local file must explicitly choose and own its cache/staging policy.
+
+Android DocumentsContract/ContentResolver APIs support tree traversal, child
+creation and other provider operations. Unsupported operations fail explicitly.
+The compatibility JSPF/XML result serializers encode selection references only;
+media decoding and metadata extraction are outside this library.
