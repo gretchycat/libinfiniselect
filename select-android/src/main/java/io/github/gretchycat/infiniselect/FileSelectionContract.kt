@@ -5,6 +5,23 @@ object FileSelectionContract {
     const val ACTION_SELECT = "io.github.gretchycat.infiniselect.action.SELECT_FILE"
     const val ACTION_SAVE = "io.github.gretchycat.infiniselect.action.SAVE_FILE"
 
+    /** Optional Infinifolder ContentProvider used by libinfiniselect for backend resolution. */
+    const val INFINIFOLDER_DOCUMENTS_AUTHORITY = "com.infinifolder.documents"
+    const val INFINIFOLDER_SELECTION_AUTHORITY = "com.infinifolder.selection"
+    const val STORAGE_METHOD_RESOLVE_SOURCE = "io.github.gretchycat.infinifolder.RESOLVE_SOURCE"
+    const val STORAGE_METHOD_RESOLVE_RELATIVE_ARCHIVE = "io.github.gretchycat.infinifolder.RESOLVE_RELATIVE_ARCHIVE"
+    const val STORAGE_METHOD_DESCRIBE_ARCHIVE = "io.github.gretchycat.infinifolder.DESCRIBE_ARCHIVE"
+    const val STORAGE_METHOD_CANONICALIZE_SOURCE = "io.github.gretchycat.infinifolder.CANONICALIZE_SOURCE"
+    const val STORAGE_EXTRA_SOURCE_URI = "io.github.gretchycat.infinifolder.extra.SOURCE_URI"
+    const val STORAGE_EXTRA_CONTENT_URI = "io.github.gretchycat.infinifolder.extra.CONTENT_URI"
+    const val STORAGE_EXTRA_AUTHORITATIVE_URI = "io.github.gretchycat.infinifolder.extra.AUTHORITATIVE_URI"
+    const val STORAGE_EXTRA_DISPLAY_NAME = "io.github.gretchycat.infinifolder.extra.DISPLAY_NAME"
+    const val STORAGE_EXTRA_MIME_TYPE = "io.github.gretchycat.infinifolder.extra.MIME_TYPE"
+    const val STORAGE_EXTRA_SIZE_BYTES = "io.github.gretchycat.infinifolder.extra.SIZE_BYTES"
+    const val STORAGE_EXTRA_BASE_URI = "io.github.gretchycat.infinifolder.extra.BASE_URI"
+    const val STORAGE_EXTRA_RELATIVE_PATH = "io.github.gretchycat.infinifolder.extra.RELATIVE_PATH"
+    const val STORAGE_EXTRA_RESOLVED_URI = "io.github.gretchycat.infinifolder.extra.RESOLVED_URI"
+
     const val EXTRA_CLIENT_ID = "io.github.gretchycat.infiniselect.CLIENT_ID"
     const val EXTRA_DISPLAY_NAME = "io.github.gretchycat.infiniselect.DISPLAY_NAME"
     const val EXTRA_MIME_TYPES = "io.github.gretchycat.infiniselect.MIME_TYPES"
@@ -17,20 +34,28 @@ object FileSelectionContract {
     const val EXTRA_REQUESTING_PACKAGE = "io.github.gretchycat.infiniselect.REQUESTING_PACKAGE"
 
     const val EXTRA_RESULT_URI = "io.github.gretchycat.infiniselect.RESULT_URI"
+    const val EXTRA_RESULT_CONTENT_URI = EXTRA_RESULT_URI
+    const val EXTRA_RESULT_AUTHORITATIVE_URI = "io.github.gretchycat.infiniselect.RESULT_AUTHORITATIVE_URI"
     const val EXTRA_RESULT_NAME = "io.github.gretchycat.infiniselect.RESULT_NAME"
     const val EXTRA_RESULT_MIME = "io.github.gretchycat.infiniselect.RESULT_MIME"
     const val EXTRA_RESULT_SIZE = "io.github.gretchycat.infiniselect.RESULT_SIZE"
     const val EXTRA_RESULT_DIRECTORY = "io.github.gretchycat.infiniselect.RESULT_DIRECTORY"
     const val EXTRA_RESULT_SCROLL_Y = "io.github.gretchycat.infiniselect.RESULT_SCROLL_Y"
     const val EXTRA_RESULT_URIS = "io.github.gretchycat.infiniselect.RESULT_URIS"
+    const val EXTRA_RESULT_CONTENT_URIS = EXTRA_RESULT_URIS
+    const val EXTRA_RESULT_AUTHORITATIVE_URIS = "io.github.gretchycat.infiniselect.RESULT_AUTHORITATIVE_URIS"
     const val EXTRA_RESULT_NAMES = "io.github.gretchycat.infiniselect.RESULT_NAMES"
     const val EXTRA_RESULT_MIMES = "io.github.gretchycat.infiniselect.RESULT_MIMES"
     const val EXTRA_RESULT_SIZES = "io.github.gretchycat.infiniselect.RESULT_SIZES"
     const val EXTRA_ITEM_DIRECTORY_URIS = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_URIS"
+    const val EXTRA_ITEM_DIRECTORY_CONTENT_URIS = EXTRA_ITEM_DIRECTORY_URIS
+    const val EXTRA_ITEM_DIRECTORY_AUTHORITATIVE_URIS = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_AUTHORITATIVE_URIS"
     const val EXTRA_ITEM_DIRECTORY_NAMES = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_NAMES"
     const val EXTRA_ITEM_DIRECTORY_COVER_URIS = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_COVER_URIS"
+    const val EXTRA_ITEM_DIRECTORY_COVER_CONTENT_URIS = EXTRA_ITEM_DIRECTORY_COVER_URIS
     /** Stable source identities paired by index with temporary selected content URIs. */
     const val EXTRA_RESULT_SOURCE_REFERENCES = "io.github.gretchycat.infiniselect.RESULT_SOURCE_REFERENCES"
+    const val EXTRA_ITEM_DIRECTORY_COVER_AUTHORITATIVE_URIS = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_COVER_AUTHORITATIVE_URIS"
     const val EXTRA_ITEM_DIRECTORY_REFERENCES = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_REFERENCES"
     const val EXTRA_ITEM_DIRECTORY_COVER_REFERENCES = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_COVER_REFERENCES"
     const val EXTRA_RESULT_DIRECTORY_REFERENCE = "io.github.gretchycat.infiniselect.RESULT_DIRECTORY_REFERENCE"

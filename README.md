@@ -38,15 +38,50 @@ contract in `FileSelectionContract`. Its picker starts at Virtual root as
 requested. Multiple selection is supported by the InfiniFolder selector and
 the Android SAF fallback.
 
-Each `SelectionItem.uri` is the read-granted content URI for immediate access.
-InfiniFolder may implement it as a short-lived stream relay. `sourceReference`
-is the paired stable Android location reference; resolve it with
-`InfiniSelect.resolveSourceReference(context, item.sourceReference)` when a
-later request needs the authoritative source again. InfiniFolder references
-use its DocumentsProvider URI, while SAF results use their selected content
-URI. References do not bypass Android URI permissions. The library forwards
-persistable grants where the provider supports them, and callers can retain
-those grants with `takePersistableUriPermission` when needed.
+Every selected item has two values with different jobs:
+
+- `SelectionItem.authoritativeUri` is its durable resource identity. It can be
+  a local file URI, a SAF document URI, an SFTP address, or an opaque
+  archive/filesystem-image URI. Keep it for playlists and later requests.
+- `SelectionItem.contentUri` is the Android URI that currently grants access
+  to the bytes. InfiniFolder commonly returns a temporary stream relay. Read
+  through it while its grant is valid; never save it as the resource identity.
+
+`FileSelectionContract.EXTRA_RESULT_AUTHORITATIVE_URI` and
+`EXTRA_RESULT_AUTHORITATIVE_URIS` carry identities separately from
+`EXTRA_RESULT_CONTENT_URI` / `EXTRA_RESULT_CONTENT_URIS`. The older `uri` and
+`sourceReference` properties remain for source compatibility; new code should
+use the explicit properties. SAF document URIs can be both identity and access
+URI because the document URI is the provider's canonical resource address.
+This does not make an InfiniFolder relay URI durable.
+
+Resolve a saved location only when its bytes are needed:
+
+```kotlin
+val opened = InfiniSelect.resolveSource(context, savedAuthoritativeUri.toString())
+    ?: error("The resource is unavailable")
+// Open opened.contentUri; persist opened.authoritativeUri.
+```
+
+This library call delegates remote, archive, and filesystem-image resolution
+to the optional InfiniFolder IPC provider. Callers do not parse backend URI
+syntax. `ResolvedSource` always keeps the access URI and authoritative
+location separate. An expired relay cannot recover a source identity unless
+the relay is still valid; retain the authoritative URI from the selection.
+
+For a readable `file://` source when InfiniFolder is unavailable,
+libinfiniselect returns a short-lived `content://` link backed directly by the
+file descriptor. It does not copy the file. The file URI remains authoritative
+and can be resolved again later while the caller still has filesystem access.
+
+Use `InfiniSelect.resolveRelativeLocation(context, playlistUri, entry)` for a
+relative playlist entry. `resolveRelativeLocationText` provides the same
+normalization for string-based URI wrappers. The library resolves ordinary
+hierarchical and SAF locations itself and delegates archive traversal to InfiniFolder. Playlist
+writers should store the resulting authoritative URI as each track's
+`location`, then call `resolveSource` only when a track is opened. InfiniSelect's
+JSPF serializer follows this rule and omits temporary content relays from
+directory and cover identity fields.
 
 `InfiniSelect.defaultDirectory(context, clientId)` and
 `InfiniSelect.setDefaultDirectory(context, clientId, uri)` store starting
@@ -94,9 +129,10 @@ source adapter. Relay references expire after 24 hours.
 
 ## Multiple items and playlists
 
-Multiple selection keeps each item as its own read-only `content://` URI. A
-client can request selections of two or more items as JSPF, with the content
-URIs in each track's `location`:
+Multiple selection keeps a grantable content URI and a separate authoritative
+location for every item. A client can request selections of two or more items
+as JSPF; each track's `location` is authoritative, while selection extras and
+`ClipData` contain the current access URIs:
 
 ```kotlin
 InfiniSelect.open(activity, OpenRequest(
@@ -110,13 +146,13 @@ InfiniSelect.open(activity, OpenRequest(
 ), REQUEST_OPEN)
 ```
 
-For one selected item, the result remains that file's content URI. For several
-items, `Intent.data` and `EXTRA_RESULT_PLAYLIST_URI` identify the generated
-JSPF document; `EXTRA_RESULT_URIS` and `ClipData` retain the individual item
-URIs. `EXTRA_RESULT_METADATA_URI` optionally identifies a companion XML
-document with each item's URI, display name, MIME type, and known size. Parse
-either result shape with `InfiniSelect.readResult(context, data)`. Generated
-JSPF and XML documents are served from the consuming app's cache through a
+For one selected item, result `Intent.data` is its current content URI and
+`EXTRA_RESULT_AUTHORITATIVE_URI` is its identity. For several items,
+`Intent.data` and `EXTRA_RESULT_PLAYLIST_URI` identify the generated JSPF
+document; parallel content and authoritative arrays retain each item. The
+optional metadata XML has separate content and authoritative attributes.
+Parse results with `InfiniSelect.readResult(context, data)`. Generated JSPF
+and XML documents are served from the consuming app's cache through a
 read-only provider and expire after 24 hours.
 
 `allowRecursiveAudioDirectories` makes a long press on a directory in
@@ -130,7 +166,7 @@ progress label and folder/track counts. Selected items also include their
 parent directory content URI and display name in `SelectionItem`, the parallel
 `EXTRA_ITEM_DIRECTORY_URIS` / `EXTRA_ITEM_DIRECTORY_NAMES` arrays, and the
 generated JSPF InfiniSelect extension fields. `directoryReference` pairs the
-directory URI with its stable location identity. This lets clients retain
+directory content URI with its authoritative location. This lets clients retain
 directory grouping and artwork context without rescanning the hierarchy.
 For recursive selections, InfiniFolder also attaches a read-granted URI to the
 first readable `cover.*` image in each directory. It passes the URI through

@@ -11,7 +11,7 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.util.UUID
 
-/** Serves short-lived JSPF/XML documents created by the selector, without exposing cache paths. */
+/** Serves short-lived generated documents and direct local-file access links without copying source bytes. */
 class SelectionDocumentProvider : ContentProvider() {
     override fun onCreate() = true
 
@@ -49,8 +49,9 @@ class SelectionDocumentProvider : ContentProvider() {
         if (!token.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))) return null
         val prefs = context.getSharedPreferences(PREFS, 0)
         val issued = prefs.getLong("$token.issued", 0L)
-        val file = File(context.cacheDir, "$DIRECTORY/$token")
-        if (issued == 0L || System.currentTimeMillis() - issued > TTL_MS || !file.isFile) {
+        val file = prefs.getString("$token.path", null)?.let(::File)
+            ?: File(context.cacheDir, "$DIRECTORY/$token")
+        if (issued == 0L || System.currentTimeMillis() - issued > TTL_MS || !file.isFile || !file.canRead()) {
             remove(context, token)
             return null
         }
@@ -81,6 +82,24 @@ class SelectionDocumentProvider : ContentProvider() {
             return Uri.Builder().scheme("content").authority(authority(context)).appendPath(token).build()
         }
 
+        /** Make a temporary readable content URI for an existing local file, without materializing it. */
+        fun createFileLink(context: android.content.Context, source: File, name: String, mime: String): Uri {
+            require(name.isNotBlank() && !name.contains('\u0000')) { "Selection file name is invalid" }
+            val file = source.canonicalFile
+            require(file.isFile && file.canRead()) { "The local file is not readable" }
+            val directory = File(context.cacheDir, DIRECTORY).apply { mkdirs() }
+            cleanup(context, directory)
+            val token = UUID.randomUUID().toString()
+            val now = System.currentTimeMillis()
+            check(context.getSharedPreferences(PREFS, 0).edit()
+                .putString("$token.path", file.path)
+                .putString("$token.name", name)
+                .putString("$token.mime", mime)
+                .putLong("$token.issued", now)
+                .commit()) { "Could not register the local file access link" }
+            return Uri.Builder().scheme("content").authority(authority(context)).appendPath(token).build()
+        }
+
         private fun cleanup(context: android.content.Context, directory: File) {
             val prefs = context.getSharedPreferences(PREFS, 0)
             val now = System.currentTimeMillis()
@@ -89,7 +108,7 @@ class SelectionDocumentProvider : ContentProvider() {
                 val token = key.removeSuffix(".issued")
                 if (now - prefs.getLong(key, now) > TTL_MS) {
                     File(directory, token).delete()
-                    editor.remove("$token.name").remove("$token.mime").remove(key)
+                    editor.remove("$token.path").remove("$token.name").remove("$token.mime").remove(key)
                 }
             }
             editor.apply()
@@ -97,7 +116,7 @@ class SelectionDocumentProvider : ContentProvider() {
 
         private fun remove(context: android.content.Context, token: String) {
             File(context.cacheDir, "$DIRECTORY/$token").delete()
-            context.getSharedPreferences(PREFS, 0).edit().remove("$token.name").remove("$token.mime")
+            context.getSharedPreferences(PREFS, 0).edit().remove("$token.path").remove("$token.name").remove("$token.mime")
                 .remove("$token.issued").apply()
         }
 

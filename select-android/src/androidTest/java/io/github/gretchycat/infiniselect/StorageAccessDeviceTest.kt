@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.Assert.*
+import java.io.File
 
 /** Runs against Android's actual resolver and descriptor APIs; compilation alone is not execution. */
 @RunWith(AndroidJUnit4::class)
@@ -32,5 +33,22 @@ class StorageAccessDeviceTest {
     @Test fun testTemporarySelectionIsNotPersisted() {
         val uri = InfiniSelect.createDocument(context, "temporary", "application/octet-stream", byteArrayOf(1))
         assertFalse(StorageAccess.persist(context, Intent().setData(uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)))
+    }
+
+    @Test fun testLocalFileResolutionReturnsContentAccessAndPreservesFileIdentity() {
+        val file = File(context.cacheDir, "authoritative-source.bin").apply {
+            writeBytes(byteArrayOf(5, 13, 21, 34))
+        }
+        val authoritative = android.net.Uri.fromFile(file)
+        val resolved = requireNotNull(InfiniSelect.resolveSource(context, authoritative.toString()))
+
+        assertEquals("content", resolved.contentUri.scheme)
+        assertEquals(authoritative, resolved.authoritativeUri)
+        StorageAccess.openRead(context, resolved.contentUri).use {
+            assertArrayEquals(byteArrayOf(5, 13, 21, 34), it.readBytes())
+        }
+        StorageAccess.openDescriptor(context, resolved.contentUri).use {
+            assertEquals(StorageAccess.Support.SUPPORTED, StorageAccess.seekable(it))
+        }
     }
 }

@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.ResultReceiver
 import android.database.Cursor
 import android.provider.OpenableColumns
+import java.io.File
 
 /** Request parameters for one viewer's file-open action. */
 data class OpenRequest(
@@ -22,7 +23,7 @@ data class OpenRequest(
     val hideUnsupported: Boolean = false,
     /** Restore the source listing's vertical scroll position when reopening it. */
     val initialScrollY: Int = 0,
-    /** Package a multi-file selection as JSPF, retaining the individual content URIs. */
+    /** Package a multi-file selection as JSPF, retaining each item's authoritative URI. */
     val multipleSelectionDelivery: MultipleSelectionDelivery = MultipleSelectionDelivery.ITEM_URIS,
     /** Optionally return a companion XML document with the selected-item metadata. */
     val metadataFormat: SelectionMetadataFormat = SelectionMetadataFormat.NONE,
@@ -108,6 +109,23 @@ data class SelectionItem(
     val directoryReference: String? = null,
     /** Stable location identity for [directoryCoverUri]. */
     val directoryCoverReference: String? = null,
+) {
+    /** Short lived or persisted Android access URI. */
+    val contentUri: Uri get() = uri
+    /** Stable storage identity; never derive this from [contentUri] when a source reference exists. */
+    val authoritativeUri: Uri get() = sourceReference?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        ?.takeUnless(Uri::isTemporarySelectionUri)
+        ?: uri.takeUnless(Uri::isTemporarySelectionUri)
+        ?: throw IllegalStateException("Selection relay has no authoritative URI")
+}
+
+/** A fresh Android-readable link paired with the durable backend location. */
+data class ResolvedSource(
+    val contentUri: Uri,
+    val authoritativeUri: Uri,
+    val displayName: String? = null,
+    val mimeType: String? = null,
+    val sizeBytes: Long? = null,
 )
 
 data class SelectionResult(
@@ -115,8 +133,13 @@ data class SelectionResult(
     val playlistUri: Uri? = null,
     val metadataUri: Uri? = null,
     val directoryReference: String? = null,
+    /** Current Android access URI for the selected starting directory, if supplied. */
+    val directoryContentUri: Uri? = null,
 ) {
     val primaryUri: Uri? get() = playlistUri ?: items.firstOrNull()?.uri
+    /** Stable location identity paired with [directoryContentUri]. */
+    val directoryAuthoritativeUri: Uri? get() = directoryReference
+        ?.let { runCatching { Uri.parse(it) }.getOrNull() }
 }
 
 /** Launches the reusable file selection flow from an Activity. */
@@ -145,6 +168,21 @@ object InfiniSelect {
     fun createDocument(context: Context, name: String, mimeType: String, contents: ByteArray): Uri =
         SelectionDocumentProvider.create(context, name, mimeType, contents)
 
+    /** True for an expiring selector relay, which is an access handle rather than a saved identity. */
+    fun isTemporaryAccessUri(uri: Uri?): Boolean = uri?.isTemporarySelectionUri() == true
+
+    /** Choose a stable identity candidate without interpreting the backend URI format. */
+    fun authoritativeCandidate(reference: String?, fallback: Uri? = null): Uri? =
+        sequenceOf(reference?.takeIf(String::isNotBlank)?.let { runCatching { Uri.parse(it) }.getOrNull() }, fallback)
+            .filterNotNull()
+            .firstOrNull { !it.isTemporarySelectionUri() }
+
+    /** Select a durable URI string without interpreting its backend-specific syntax. */
+    fun authoritativeLocationCandidate(reference: String?, fallback: Uri? = null): String? =
+        sequenceOf(reference?.takeIf(String::isNotBlank), fallback?.toString())
+            .filterNotNull()
+            .firstOrNull { !isTemporarySelectionReference(it) }
+
     fun defaultDirectory(context: Context, clientId: String): Uri? {
         val uri = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             .getString(DIRECTORY_PREFIX + clientId, null)?.let { runCatching { Uri.parse(it) }.getOrNull() }
@@ -163,20 +201,250 @@ object InfiniSelect {
     }
 
     /**
-     * Resolve a serialized authoritative source reference to its Android URI.
-     * InfiniFolder returns stable DocumentsProvider URIs here, while Android
-     * fallback sources use their SAF content URI. The URI grant still needs to
-     * be held by this app; this method does not broaden storage permissions.
+     * Resolve a durable storage address to a fresh Android content link.
+     * Remote, archive, filesystem-image, local-file and legacy InfiniFolder
+     * references are delegated to InfiniFolder when it is installed. Ordinary
+     * Android content URIs remain direct SAF/provider links when it is absent.
      */
-    fun resolveSourceReference(context: Context, reference: String?): Uri? {
+    fun resolveSource(
+        context: Context,
+        reference: String?,
+        displayName: String? = null,
+        mimeType: String? = null,
+        sizeBytes: Long? = null,
+    ): ResolvedSource? {
         if (reference.isNullOrBlank()) return null
-        val uri = runCatching { Uri.parse(reference) }.getOrNull() ?: return null
-        return when (uri.scheme?.lowercase()) {
-            "content" -> uri.takeIf { !it.authority.isNullOrBlank() &&
-                context.packageManager.resolveContentProvider(it.authority!!, 0) != null }
-            "file" -> uri
+        val requestedUri = runCatching { Uri.parse(reference) }.getOrNull() ?: return null
+        val uri = authoritativeUri(context, requestedUri.toString()) ?: when {
+            requestedUri.authority == INFINIFOLDER_DOCUMENTS_AUTHORITY ||
+                requestedUri.isTemporarySelectionUri() -> return null
+            else -> requestedUri
+        }
+        val legacyFolderReference = uri.scheme.equals("content", true) &&
+            uri.authority == INFINIFOLDER_DOCUMENTS_AUTHORITY
+        val directAndroidContent = uri.scheme.equals("content", true) &&
+            !legacyFolderReference && !uri.authority.orEmpty().endsWith(SELECTION_AUTHORITY_SUFFIX, true)
+        if (directAndroidContent) {
+            // A granted SAF URI is usable even when package visibility prevents
+            // PackageManager from reporting its provider package.
+            return ResolvedSource(uri, uri, displayName, mimeType, sizeBytes)
+        }
+
+        val extras = Bundle().apply {
+            putString(EXTRA_SOURCE_URI, uri.toString())
+            displayName?.let { putString(EXTRA_DISPLAY_NAME, it) }
+            mimeType?.let { putString(EXTRA_MIME_TYPE, it) }
+            sizeBytes?.let { putLong(EXTRA_SIZE_BYTES, it) }
+        }
+        val response = runCatching {
+            context.contentResolver.call(
+                Uri.Builder().scheme("content").authority(INFINIFOLDER_SELECTION_AUTHORITY).build(),
+                METHOD_RESOLVE_SOURCE,
+                null,
+                extras,
+            )
+        }.getOrNull()
+        val contentUri = response?.getString(EXTRA_CONTENT_URI)?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        val authoritativeUri = response?.getString(EXTRA_AUTHORITATIVE_URI)
+            ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        if (contentUri != null && authoritativeUri != null) {
+            return ResolvedSource(
+                contentUri = contentUri,
+                authoritativeUri = authoritativeUri,
+                displayName = response.getString(EXTRA_DISPLAY_NAME) ?: displayName,
+                mimeType = response.getString(EXTRA_MIME_TYPE) ?: mimeType,
+                sizeBytes = response.getLong(EXTRA_SIZE_BYTES, -1L).takeIf { it >= 0L } ?: sizeBytes,
+            )
+        }
+
+        // Android files and temporary relay links remain useful without Folder.
+        // Backend-specific schemes never masquerade as readable content URIs.
+        return when {
+            uri.scheme.equals("file", true) -> runCatching {
+                val file = uri.path?.let(::File) ?: return null
+                val name = displayName?.takeIf(String::isNotBlank) ?: file.name
+                val mime = mimeType?.takeIf(String::isNotBlank)
+                    ?: android.webkit.MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+                    ?: "application/octet-stream"
+                val content = SelectionDocumentProvider.createFileLink(context, file, name, mime)
+                ResolvedSource(content, uri, name, mime, sizeBytes ?: file.length())
+            }.getOrNull()
+            uri.scheme.equals("content", true) && uri.authority.orEmpty()
+                .endsWith(SELECTION_AUTHORITY_SUFFIX, true) -> {
+                val installed = context.packageManager.resolveContentProvider(uri.authority!!, 0) != null
+                uri.takeIf { installed }?.let { ResolvedSource(it, it, displayName, mimeType, sizeBytes) }
+            }
             else -> null
         }
+    }
+
+    /** Compatibility convenience for callers that only need the current content URI. */
+    fun resolveSourceReference(context: Context, reference: String?): Uri? =
+        resolveSource(context, reference)?.contentUri
+
+    /** Canonicalize a legacy or provider-owned reference without creating an access link. */
+    fun authoritativeUri(context: Context?, reference: String?): Uri? {
+        if (reference.isNullOrBlank()) return null
+        val uri = runCatching { Uri.parse(reference) }.getOrNull() ?: return null
+        val temporaryRelay = uri.isTemporarySelectionUri()
+        val legacyFolderReference = uri.scheme.equals("content", true) &&
+            uri.authority == INFINIFOLDER_DOCUMENTS_AUTHORITY
+        if (!temporaryRelay && !legacyFolderReference) return uri
+        if (context == null) return if (temporaryRelay) null else uri
+        val result = context?.let { appContext -> runCatching {
+            appContext.contentResolver.call(
+                Uri.Builder().scheme("content").authority(INFINIFOLDER_SELECTION_AUTHORITY).build(),
+                METHOD_CANONICALIZE_SOURCE,
+                null,
+                Bundle().apply { putString(EXTRA_SOURCE_URI, uri.toString()) },
+            )?.getString(EXTRA_AUTHORITATIVE_URI)
+        }.getOrNull() }
+        // A legacy InfiniFolder DocumentsProvider URI remains the durable
+        // identity if the optional app is absent. Canonicalize it when the
+        // provider can answer, but never replace it with a relay URI.
+        return result?.let { runCatching { Uri.parse(it) }.getOrNull() }
+            ?: if (temporaryRelay) null else uri
+    }
+
+    /**
+     * Resolve a playlist or directory-relative location without exposing backend
+     * URI syntax to clients. Archive traversal is delegated to InfiniFolder;
+     * ordinary URI and Android DocumentsProvider resolution stays in this library.
+     */
+    fun resolveRelativeLocation(context: Context?, authoritativeBase: Uri, relativePath: String): Uri? {
+        val result = resolveRelativeLocationText(context, authoritativeBase.toString(), relativePath)
+            ?: return null
+        return runCatching { Uri.parse(result) }.getOrNull()
+    }
+
+    /** String form for clients that preserve their own URI wrapper while the library resolves paths. */
+    fun resolveRelativeLocationText(context: Context?, authoritativeBase: String, relativePath: String): String? {
+        val reference = relativePath.trim()
+        if (reference.isEmpty()) return authoritativeBase
+        val parsedReference = runCatching {
+            java.net.URI(reference.replace(" ", "%20"))
+        }.getOrNull()
+        if (!reference.startsWith("//") && parsedReference?.isAbsolute == true) {
+            return authoritativeUri(context, reference)?.toString() ?: androidUriString(parsedReference)
+        }
+
+        val parsedBase = runCatching {
+            java.net.URI(authoritativeBase.replace(" ", "%20"))
+        }.getOrNull() ?: return null
+        val baseScheme = parsedBase.scheme.orEmpty()
+        val accessUri = if (baseScheme.equals("content", true) || baseScheme.equals("archive", true))
+            runCatching { Uri.parse(authoritativeBase) }.getOrNull() else null
+        val canonicalBase = if (baseScheme.equals("content", true) &&
+            (parsedBase.rawAuthority == INFINIFOLDER_DOCUMENTS_AUTHORITY ||
+                parsedBase.rawAuthority?.endsWith(SELECTION_AUTHORITY_SUFFIX, true) == true)) {
+            authoritativeUri(context, authoritativeBase)?.toString()
+        } else null
+        if (canonicalBase != null && canonicalBase != authoritativeBase) {
+            return resolveRelativeLocationText(context, canonicalBase, reference)
+        }
+        // An expired access handle cannot serve as a playlist's containing
+        // location. Do not resolve a relative path against its opaque token.
+        if (isTemporarySelectionReference(authoritativeBase)) return null
+
+        if (baseScheme.equals("archive", true)) {
+            if (accessUri == null) return null
+            val extras = Bundle().apply {
+                putString(EXTRA_BASE_URI, authoritativeBase)
+                putString(EXTRA_RELATIVE_PATH, reference)
+            }
+            val resolved = context?.let { appContext -> runCatching {
+                appContext.contentResolver.call(
+                    Uri.Builder().scheme("content").authority(INFINIFOLDER_SELECTION_AUTHORITY).build(),
+                    METHOD_RESOLVE_RELATIVE_ARCHIVE,
+                    null,
+                    extras,
+                )?.getString(EXTRA_RESOLVED_URI)
+            }.getOrNull() }
+            return resolved
+        }
+
+        if (baseScheme.equals("content", true) && accessUri != null) {
+            val isTree = runCatching { android.provider.DocumentsContract.isTreeUri(accessUri) }
+                .getOrDefault(false)
+            val isDocument = context != null && runCatching {
+                android.provider.DocumentsContract.isDocumentUri(context, accessUri)
+            }.getOrDefault(false)
+            if (isDocument) {
+                val authority = accessUri.authority ?: return null
+                val documentId = runCatching {
+                    android.provider.DocumentsContract.getDocumentId(accessUri)
+                }.getOrNull() ?: return null
+                val colon = documentId.indexOf(':')
+                val prefix = if (colon >= 0) documentId.substring(0, colon + 1) else ""
+                val path = if (colon >= 0) documentId.substring(colon + 1) else documentId
+                val baseDirectory = path.substringBeforeLast('/', "")
+                val decodedReference = Uri.decode(reference.replace("+", "%2B"))
+                val target = if (decodedReference.startsWith('/')) normalizePath("", decodedReference)
+                    else normalizePath(baseDirectory, decodedReference)
+                val targetId = prefix + target
+                return runCatching {
+                    if (isTree) android.provider.DocumentsContract.buildDocumentUriUsingTree(accessUri, targetId)
+                    else android.provider.DocumentsContract.buildDocumentUri(authority, targetId)
+                }.getOrNull()?.toString()
+            }
+            if (isTree) {
+                val documentId = runCatching {
+                    android.provider.DocumentsContract.getTreeDocumentId(accessUri)
+                }.getOrNull() ?: return null
+                val colon = documentId.indexOf(':')
+                val prefix = if (colon >= 0) documentId.substring(0, colon + 1) else ""
+                val path = if (colon >= 0) documentId.substring(colon + 1) else documentId
+                val decodedReference = Uri.decode(reference.replace("+", "%2B"))
+                val target = if (decodedReference.startsWith('/')) normalizePath("", decodedReference)
+                    else normalizePath(path, decodedReference)
+                return runCatching {
+                    android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                        accessUri, prefix + target)
+                }.getOrNull()?.toString()
+            }
+        }
+
+        val encodedReference = reference.replace(" ", "%20")
+        return runCatching { androidUriString(parsedBase.resolve(encodedReference).normalize()) }.getOrNull()
+    }
+
+    private fun androidUriString(uri: java.net.URI): String {
+        if (uri.scheme.equals("file", true) && uri.rawAuthority == null && uri.rawPath?.startsWith('/') == true) {
+            return "file://${uri.rawPath}" + (uri.rawQuery?.let { "?$it" } ?: "") +
+                (uri.rawFragment?.let { "#$it" } ?: "")
+        }
+        return uri.toASCIIString()
+    }
+
+    /** Return the best display name without exposing archive or backend syntax to callers. */
+    fun displayName(context: Context?, authoritativeUri: Uri, fallback: String? = null): String? {
+        if (authoritativeUri.scheme.equals("archive", true)) {
+            val result = context?.let { appContext -> runCatching {
+                appContext.contentResolver.call(
+                    Uri.Builder().scheme("content").authority(INFINIFOLDER_SELECTION_AUTHORITY).build(),
+                    METHOD_DESCRIBE_ARCHIVE,
+                    null,
+                    Bundle().apply { putString(EXTRA_SOURCE_URI, authoritativeUri.toString()) },
+                )?.getString(EXTRA_DISPLAY_NAME)
+            }.getOrNull() }
+            if (!result.isNullOrBlank()) return result
+        }
+        val pathName = authoritativeUri.lastPathSegment?.let(Uri::decode)?.substringAfterLast('/')
+            ?.takeIf(String::isNotBlank)
+        return pathName ?: fallback?.takeIf(String::isNotBlank)
+    }
+
+    private fun normalizePath(baseDirectory: String, relative: String): String {
+        val segments = baseDirectory.replace('\\', '/').split('/').filter(String::isNotEmpty).toMutableList()
+        for (part in relative.replace('\\', '/').split('/')) {
+            when (part) {
+                "", "." -> Unit
+                ".." -> if (segments.isNotEmpty()) segments.removeAt(segments.lastIndex)
+                else -> segments.add(part)
+            }
+        }
+        return segments.joinToString("/")
     }
 
     /** Read the normalized single- or multi-item result returned by [FileSelectActivity]. */
@@ -190,9 +458,12 @@ object InfiniSelect {
         val directoryUris = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS).orEmpty()
         val directoryNames = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES).orEmpty()
         val directoryCoverUris = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS).orEmpty()
-        val sourceReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES).orEmpty()
-        val directoryReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES).orEmpty()
-        val directoryCoverReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES).orEmpty()
+        val sourceReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_AUTHORITATIVE_URIS)
+            ?: intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES).orEmpty()
+        val directoryReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_AUTHORITATIVE_URIS)
+            ?: intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES).orEmpty()
+        val directoryCoverReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_AUTHORITATIVE_URIS)
+            ?: intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES).orEmpty()
         val itemUris = if (uris.isNotEmpty()) uris else buildList {
             intent.data?.let { add(it) }
             intent.clipData?.let { clip ->
@@ -206,20 +477,26 @@ object InfiniSelect {
             val suppliedSize = sizes?.getOrNull(index)?.takeIf { it >= 0L }
             val queried = if (suppliedName == null || suppliedMime == null || !hasSuppliedSize)
                 queryItem(context, uri) else null to null
+            val suppliedSource = sourceReferences.getOrNull(index)?.takeIf(String::isNotBlank)
+                ?: uri.toString()
+            val authoritativeSource = authoritativeUri(context, suppliedSource)
+                ?: throw IllegalArgumentException("Selection relay omitted its authoritative URI")
+            val directoryAccessUri = directoryUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse)
+            val coverAccessUri = directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse)
             SelectionItem(
                 uri = uri,
                 name = suppliedName ?: queried.first ?: uri.lastPathSegment.orEmpty(),
                 mimeType = suppliedMime
                     ?: context.contentResolver.getType(uri) ?: "application/octet-stream",
                 sizeBytes = suppliedSize ?: queried.second,
-                sourceReference = sourceReferences.getOrNull(index)?.takeIf(String::isNotBlank) ?: uri.toString(),
-                directoryUri = directoryUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
+                sourceReference = authoritativeSource.toString(),
+                directoryUri = directoryAccessUri,
                 directoryName = directoryNames.getOrNull(index)?.takeIf(String::isNotBlank),
-                directoryReference = directoryReferences.getOrNull(index)?.takeIf(String::isNotBlank)
-                    ?: directoryUris.getOrNull(index)?.takeIf(String::isNotBlank),
-                directoryCoverUri = directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
-                directoryCoverReference = directoryCoverReferences.getOrNull(index)?.takeIf(String::isNotBlank)
-                    ?: directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank),
+                directoryReference = stableLocation(context,
+                    directoryReferences.getOrNull(index), directoryAccessUri),
+                directoryCoverUri = coverAccessUri,
+                directoryCoverReference = stableLocation(context,
+                    directoryCoverReferences.getOrNull(index), coverAccessUri),
                 directoryArtworkMetadataResolved = directoryUris.getOrNull(index)?.isNotBlank() == true,
             )
         }
@@ -227,28 +504,35 @@ object InfiniSelect {
             ?.let(Uri::parse)
             ?: intent.data?.takeIf { intent.type == JSPF_MIME }
         val metadata = intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_METADATA_URI)?.let(Uri::parse)
-        val directoryReference = intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
-            ?: intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)
-        return SelectionResult(items, playlist, metadata, directoryReference)
+        val directoryAccessUri = intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)
+            ?.takeIf(String::isNotBlank)?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        val directoryReference = stableLocation(context,
+            intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE), directoryAccessUri)
+        return SelectionResult(items, playlist, metadata, directoryReference, directoryAccessUri)
     }
 
-    /** Create a readable JSPF document whose locations are the supplied content/file URIs. */
+    /** Create a readable JSPF document with durable backend locations where available. */
     fun createJspfPlaylist(context: Context, items: List<SelectionItem>, title: String = "Selection.jspf"): Uri {
         require(items.isNotEmpty()) { "A playlist needs at least one item" }
         val tracks = org.json.JSONArray()
         items.forEach { item ->
+            val sourceLocation = stableLocation(context, item.sourceReference, item.contentUri)
+                ?: throw IllegalArgumentException("Cannot serialize an item without an authoritative URI")
+            val directoryLocation = stableLocation(context, item.directoryReference, item.directoryUri)
+            val coverLocation = stableLocation(context, item.directoryCoverReference, item.directoryCoverUri)
             val fields = org.json.JSONObject()
-                .put("location", item.uri.toString())
+                .put("location", sourceLocation)
                 .put("title", item.name)
                 .put("extension", org.json.JSONObject().put("io.github.gretchycat.infiniselect", org.json.JSONObject()
                     .put("mimeType", item.mimeType)
                     .put("sizeBytes", item.sizeBytes ?: org.json.JSONObject.NULL)
-                    .put("sourceReference", item.sourceReference ?: item.uri.toString())
-                    .put("directoryUri", item.directoryUri?.toString() ?: org.json.JSONObject.NULL)
+                    .put("authoritativeUri", sourceLocation)
+                    .put("sourceReference", sourceLocation)
+                    .put("directoryUri", directoryLocation ?: org.json.JSONObject.NULL)
                     .put("directoryName", item.directoryName ?: org.json.JSONObject.NULL)
-                    .put("directoryReference", item.directoryReference ?: item.directoryUri?.toString() ?: org.json.JSONObject.NULL)
-                    .put("directoryCoverUri", item.directoryCoverUri?.toString() ?: org.json.JSONObject.NULL)
-                    .put("directoryCoverReference", item.directoryCoverReference ?: item.directoryCoverUri?.toString() ?: org.json.JSONObject.NULL)
+                    .put("directoryReference", directoryLocation ?: org.json.JSONObject.NULL)
+                    .put("directoryCoverUri", coverLocation ?: org.json.JSONObject.NULL)
+                    .put("directoryCoverReference", coverLocation ?: org.json.JSONObject.NULL)
                     .put("directoryArtworkMetadataResolved", item.directoryArtworkMetadataResolved)))
             tracks.put(fields)
         }
@@ -266,14 +550,24 @@ object InfiniSelect {
             append("<selection xmlns=\"urn:github:gretchycat:infiniselect:selection:1\" title=\"")
             append(title.xmlEscape()).append("\">\n")
             items.forEach { item ->
-                append("  <item uri=\"").append(item.uri.toString().xmlEscape())
-                    .append("\" sourceReference=\"").append((item.sourceReference ?: item.uri.toString()).xmlEscape())
+                val sourceLocation = stableLocation(context, item.sourceReference, item.contentUri)
+                    ?: throw IllegalArgumentException("Cannot serialize an item without an authoritative URI")
+                val directoryLocation = stableLocation(context, item.directoryReference, item.directoryUri)
+                val coverLocation = stableLocation(context, item.directoryCoverReference, item.directoryCoverUri)
+                append("  <item uri=\"").append(item.contentUri.toString().xmlEscape())
+                    .append("\" contentUri=\"").append(item.contentUri.toString().xmlEscape())
+                    .append("\" authoritativeUri=\"").append(sourceLocation.xmlEscape())
+                    .append("\" sourceReference=\"").append(sourceLocation.xmlEscape())
                     .append("\" name=\"").append(item.name.xmlEscape())
                     .append("\" mimeType=\"").append(item.mimeType.xmlEscape()).append("\"")
-                item.directoryUri?.let { append(" directoryUri=\"").append(it.toString().xmlEscape()).append("\"") }
-                item.directoryReference?.let { append(" directoryReference=\"").append(it.xmlEscape()).append("\"") }
-                item.directoryCoverUri?.let { append(" directoryCoverUri=\"").append(it.toString().xmlEscape()).append("\"") }
-                item.directoryCoverReference?.let { append(" directoryCoverReference=\"").append(it.xmlEscape()).append("\"") }
+                item.directoryUri?.let { accessUri ->
+                    append(" directoryContentUri=\"").append(accessUri.toString().xmlEscape()).append("\"")
+                }
+                directoryLocation?.let { append(" directoryReference=\"").append(it.xmlEscape()).append("\"") }
+                item.directoryCoverUri?.takeUnless(Uri::isTemporarySelectionUri)?.let {
+                    append(" directoryCoverContentUri=\"").append(it.toString().xmlEscape()).append("\"")
+                }
+                coverLocation?.let { append(" directoryCoverReference=\"").append(it.xmlEscape()).append("\"") }
                 item.sizeBytes?.takeIf { it >= 0L }?.let { append(" sizeBytes=\"").append(it).append("\"") }
                 append("/>\n")
             }
@@ -295,12 +589,43 @@ object InfiniSelect {
             } ?: (null to null)
     }.getOrDefault(null to null)
 
+    private fun stableLocation(context: Context, reference: String?, accessUri: Uri?): String? {
+        return sequenceOf(reference?.takeIf(String::isNotBlank), accessUri?.toString())
+            .filterNotNull()
+            .mapNotNull { authoritativeUri(context, it)?.toString() }
+            .firstOrNull()
+    }
+
     private fun String.ensureExtension(extension: String) = if (substringAfterLast('.', "").equals(extension, true)) this else "$this.$extension"
     private fun String.xmlEscape() = replace(Regex("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F]"), "")
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         .replace("\"", "&quot;").replace("'", "&apos;")
-    internal const val JSPF_MIME = "application/jspf+json"
-    private const val INFINIFOLDER_DOCUMENTS_AUTHORITY = "com.infinifolder.documents"
+    const val JSPF_MIME = "application/jspf+json"
+    private const val INFINIFOLDER_DOCUMENTS_AUTHORITY = FileSelectionContract.INFINIFOLDER_DOCUMENTS_AUTHORITY
+    private const val INFINIFOLDER_SELECTION_AUTHORITY = FileSelectionContract.INFINIFOLDER_SELECTION_AUTHORITY
+    private const val SELECTION_AUTHORITY_SUFFIX = ".selection"
+    private const val METHOD_RESOLVE_SOURCE = FileSelectionContract.STORAGE_METHOD_RESOLVE_SOURCE
+    private const val METHOD_RESOLVE_RELATIVE_ARCHIVE = FileSelectionContract.STORAGE_METHOD_RESOLVE_RELATIVE_ARCHIVE
+    private const val METHOD_DESCRIBE_ARCHIVE = FileSelectionContract.STORAGE_METHOD_DESCRIBE_ARCHIVE
+    private const val METHOD_CANONICALIZE_SOURCE = FileSelectionContract.STORAGE_METHOD_CANONICALIZE_SOURCE
+    private const val EXTRA_SOURCE_URI = FileSelectionContract.STORAGE_EXTRA_SOURCE_URI
+    private const val EXTRA_CONTENT_URI = FileSelectionContract.STORAGE_EXTRA_CONTENT_URI
+    private const val EXTRA_AUTHORITATIVE_URI = FileSelectionContract.STORAGE_EXTRA_AUTHORITATIVE_URI
+    private const val EXTRA_DISPLAY_NAME = FileSelectionContract.STORAGE_EXTRA_DISPLAY_NAME
+    private const val EXTRA_MIME_TYPE = FileSelectionContract.STORAGE_EXTRA_MIME_TYPE
+    private const val EXTRA_SIZE_BYTES = FileSelectionContract.STORAGE_EXTRA_SIZE_BYTES
+    private const val EXTRA_BASE_URI = FileSelectionContract.STORAGE_EXTRA_BASE_URI
+    private const val EXTRA_RELATIVE_PATH = FileSelectionContract.STORAGE_EXTRA_RELATIVE_PATH
+    private const val EXTRA_RESOLVED_URI = FileSelectionContract.STORAGE_EXTRA_RESOLVED_URI
+}
+
+private fun Uri.isTemporarySelectionUri(): Boolean =
+    isTemporarySelectionReference(toString())
+
+private fun isTemporarySelectionReference(reference: String): Boolean {
+    if (!reference.startsWith("content://", true)) return false
+    val authority = reference.substringAfter("://").substringBefore('/').substringBefore('?').substringBefore('#')
+    return authority.endsWith(".selection", true)
 }
 
 /** Optional backend hook. Implementations are discovered through Java ServiceLoader. */

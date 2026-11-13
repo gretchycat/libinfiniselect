@@ -406,8 +406,7 @@ class FileSelectActivity : Activity() {
             InfiniSelect.createMetadataXml(this, items) else null
         val first = items.first()
         val primary = playlistUri ?: first.uri
-        val grantedPrimary = playlistUri ?: InfiniSelect.resolveSourceReference(this, first.sourceReference)
-            ?: first.uri
+        val grantedPrimary = primary
         val primaryMime = if (playlistUri != null) InfiniSelect.JSPF_MIME else first.mimeType
         // The picker may return cross-app content URIs (for example, InfiniFolder
         // relay URIs). Re-grant every selected URI to our caller before forwarding
@@ -418,22 +417,22 @@ class FileSelectActivity : Activity() {
             val resultDirectoryReference = data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
                 ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)
             val persistentReferences = buildSet {
-                items.mapNotNullTo(this) { it.sourceReference?.let(Uri::parse) }
-                items.mapNotNullTo(this) { it.directoryReference?.let(Uri::parse) }
-                items.mapNotNullTo(this) { it.directoryCoverReference?.let(Uri::parse) }
-                resultDirectoryReference?.let { runCatching { Uri.parse(it) }.getOrNull() }?.let(::add)
+                items.mapNotNullTo(this) { it.sourceReference?.let(::parseGrantableContentUri) }
+                items.mapNotNullTo(this) { it.directoryReference?.let(::parseGrantableContentUri) }
+                items.mapNotNullTo(this) { it.directoryCoverReference?.let(::parseGrantableContentUri) }
+                resultDirectoryReference?.let(::parseGrantableContentUri)?.let(::add)
             }
             val forwardedUris = buildList {
                 add(primary)
                 items.forEach { add(it.uri) }
-                items.mapNotNullTo(this) { it.sourceReference?.let(Uri::parse) }
+                items.mapNotNullTo(this) { it.sourceReference?.let(::parseGrantableContentUri) }
                 items.mapNotNullTo(this) { it.directoryUri }
-                items.mapNotNullTo(this) { it.directoryReference?.let(Uri::parse) }
+                items.mapNotNullTo(this) { it.directoryReference?.let(::parseGrantableContentUri) }
                 items.mapNotNullTo(this) { it.directoryCoverUri }
-                items.mapNotNullTo(this) { it.directoryCoverReference?.let(Uri::parse) }
-                resultDirectoryReference?.let { runCatching { Uri.parse(it) }.getOrNull() }?.let(::add)
+                items.mapNotNullTo(this) { it.directoryCoverReference?.let(::parseGrantableContentUri) }
+                resultDirectoryReference?.let(::parseGrantableContentUri)?.let(::add)
                 metadataUri?.let(::add)
-            }.distinct()
+            }.filter { it.scheme.equals("content", true) }.distinct()
             runCatching {
                 forwardedUris.forEach { uri ->
                     val canPersist = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0 &&
@@ -460,18 +459,28 @@ class FileSelectActivity : Activity() {
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_NAMES, ArrayList(items.map { it.name }))
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_MIMES, ArrayList(items.map { it.mimeType }))
         data.putExtra(FileSelectionContract.EXTRA_RESULT_SIZES, items.map { it.sizeBytes ?: -1L }.toLongArray())
-        data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES,
-            ArrayList(items.map { it.sourceReference ?: it.uri.toString() }))
+        val authoritativeUris = ArrayList(items.map { it.sourceReference ?: it.uri.toString() })
+        data.putExtra(FileSelectionContract.EXTRA_RESULT_AUTHORITATIVE_URI, authoritativeUris.firstOrNull())
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_AUTHORITATIVE_URIS, authoritativeUris)
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES, authoritativeUris)
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS,
             ArrayList(items.map { it.directoryUri?.toString().orEmpty() }))
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES,
             ArrayList(items.map { it.directoryName.orEmpty() }))
-        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES,
-            ArrayList(items.map { it.directoryReference ?: it.directoryUri?.toString().orEmpty() }))
+        val authoritativeDirectories = ArrayList(items.map {
+            it.directoryReference ?: it.directoryUri?.toString().orEmpty()
+        })
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_AUTHORITATIVE_URIS,
+            authoritativeDirectories)
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES, authoritativeDirectories)
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS,
             ArrayList(items.map { it.directoryCoverUri?.toString().orEmpty() }))
-        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES,
-            ArrayList(items.map { it.directoryCoverReference ?: it.directoryCoverUri?.toString().orEmpty() }))
+        val authoritativeCovers = ArrayList(items.map {
+            it.directoryCoverReference ?: it.directoryCoverUri?.toString().orEmpty()
+        })
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_AUTHORITATIVE_URIS,
+            authoritativeCovers)
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES, authoritativeCovers)
         playlistUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_PLAYLIST_URI, it.toString()) }
         metadataUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_METADATA_URI, it.toString()) }
         data.putExtra("displayName", if (playlistUri != null) "Selection.jspf" else first.name)
@@ -482,27 +491,18 @@ class FileSelectActivity : Activity() {
         val persistableGrant = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
         data.flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or persistableGrant or
             (data.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        val clipUris = if (playlistUri != null) {
-            // Keep stable references in ClipData so Android can persist their
-            // document-provider grants; the JSPF carries the matching strings.
-            buildList {
-                add(primary)
-                items.mapNotNullTo(this) { it.sourceReference?.let(Uri::parse) }
-                items.mapNotNullTo(this) { it.directoryReference?.let(Uri::parse) }
-                items.mapNotNullTo(this) { it.directoryCoverReference?.let(Uri::parse) }
-                data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
-                    ?.let { runCatching { Uri.parse(it) }.getOrNull() }?.let(::add)
-                metadataUri?.let(::add)
-            }.distinct()
-        } else buildList {
-            items.mapNotNullTo(this) { it.sourceReference?.let(Uri::parse) }
+        val clipUris = buildList {
+            add(primary)
+            items.mapNotNullTo(this) { it.uri }
+            items.mapNotNullTo(this) { it.sourceReference?.let(::parseGrantableContentUri) }
             items.mapNotNullTo(this) { it.directoryUri }
-            items.mapNotNullTo(this) { it.directoryReference?.let(Uri::parse) }
-            items.mapNotNullTo(this) { it.directoryCoverReference?.let(Uri::parse) }
+            items.mapNotNullTo(this) { it.directoryReference?.let(::parseGrantableContentUri) }
+            items.mapNotNullTo(this) { it.directoryCoverUri }
+            items.mapNotNullTo(this) { it.directoryCoverReference?.let(::parseGrantableContentUri) }
             data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
-                ?.let { runCatching { Uri.parse(it) }.getOrNull() }?.let(::add)
+                ?.let(::parseGrantableContentUri)?.let(::add)
             metadataUri?.let(::add)
-        }.distinct()
+        }.filter { it.scheme.equals("content", true) }.distinct()
         data.clipData = android.content.ClipData.newRawUri(
             if (playlistUri != null) "Selection.jspf" else first.name, clipUris.first()).apply {
             clipUris.drop(1).forEach { addItem(android.content.ClipData.Item(it)) }
@@ -525,9 +525,12 @@ class FileSelectActivity : Activity() {
         val directoryUris = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS).orEmpty()
         val directoryNames = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES).orEmpty()
         val directoryCoverUris = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS).orEmpty()
-        val sourceReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES).orEmpty()
-        val directoryReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES).orEmpty()
-        val directoryCoverReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES).orEmpty()
+        val sourceReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_AUTHORITATIVE_URIS)
+            ?: data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES).orEmpty()
+        val directoryReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_AUTHORITATIVE_URIS)
+            ?: data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES).orEmpty()
+        val directoryCoverReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_AUTHORITATIVE_URIS)
+            ?: data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES).orEmpty()
         return candidates.mapIndexed { index, uri ->
             val suppliedName = names.getOrNull(index)?.takeIf(String::isNotBlank)
             val suppliedMime = mimes.getOrNull(index)?.takeIf(String::isNotBlank)
@@ -552,7 +555,9 @@ class FileSelectActivity : Activity() {
                     ?: contentResolver.getType(uri) ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_MIME)
                     ?: "application/octet-stream",
                 suppliedSize ?: queried.second,
-                sourceReference = sourceReferences.getOrNull(index)?.takeIf(String::isNotBlank) ?: uri.toString(),
+                sourceReference = sourceReferences.getOrNull(index)?.takeIf(String::isNotBlank)
+                    ?: uri.toString().takeUnless { uri.authority.orEmpty().endsWith(".selection", true) }
+                    ?: throw IllegalArgumentException("Selection relay omitted its authoritative URI"),
                 directoryUri = directoryUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
                 directoryName = directoryNames.getOrNull(index)?.takeIf(String::isNotBlank),
                 directoryReference = directoryReferences.getOrNull(index)?.takeIf(String::isNotBlank)
@@ -563,6 +568,9 @@ class FileSelectActivity : Activity() {
                 directoryArtworkMetadataResolved = directoryUris.getOrNull(index)?.isNotBlank() == true)
         }
     }
+
+    private fun parseGrantableContentUri(reference: String): Uri? = runCatching { Uri.parse(reference) }
+        .getOrNull()?.takeIf { it.scheme.equals("content", true) }
 
     private fun finishWithCancel() { setResult(RESULT_CANCELED); finish() }
 
