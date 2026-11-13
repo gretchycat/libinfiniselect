@@ -78,7 +78,7 @@ class FileSelectActivity : Activity() {
             putExtra(Intent.EXTRA_TITLE, request.fileName)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                 Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-            request.initialDirectory?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
+            safInitialDirectory(request.initialDirectory)?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
         }
         runCatching { startActivityForResult(picker, REQUEST_SAF_SAVE) }
             .onFailure { finishSaveFailure("No file picker is available: ${it.message ?: "unavailable"}") }
@@ -113,6 +113,10 @@ class FileSelectActivity : Activity() {
         ) else @Suppress("DEPRECATION") packageManager.getPackageInfo(INFINIFOLDER_PACKAGE, 0)
         true
     } catch (_: PackageManager.NameNotFoundException) { false }
+
+    private fun safInitialDirectory(uri: Uri?): Uri? = uri?.takeUnless {
+        it.authority == "com.infinifolder.documents" && !isInfiniFolderInstalled()
+    }
 
     private fun showSourceChooser() {
         inSourceChooser = true
@@ -217,7 +221,8 @@ class FileSelectActivity : Activity() {
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, request.allowMultiple)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
             if (intent.getBooleanExtra("io.github.gretchycat.infiniselect.WRITABLE", false)) addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-            val initial = request.initialDirectory ?: packageManager.resolveContentProvider("com.infinifolder.documents", 0)
+            val initial = safInitialDirectory(request.initialDirectory)
+                ?: packageManager.resolveContentProvider("com.infinifolder.documents", 0)
                 ?.let { DocumentsContract.buildDocumentUri(it.authority, "root") }
             initial?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
         }
@@ -229,7 +234,7 @@ class FileSelectActivity : Activity() {
         val picker = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                 Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-            request.initialDirectory?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
+            safInitialDirectory(request.initialDirectory)?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
         }
         runCatching { startActivityForResult(picker, REQUEST_DEFAULT_DIRECTORY) }
             .onFailure { showMessage("Android's folder picker is unavailable: ${it.message ?: "no picker app"}") }
@@ -276,7 +281,8 @@ class FileSelectActivity : Activity() {
             }
             REQUEST_INFINIFOLDER_SAVE -> {
                 data?.let { result ->
-                    val directory = result.getStringExtra(FileSelectionContract.EXTRA_SAVE_DIRECTORY)
+                    val directory = result.getStringExtra(FileSelectionContract.EXTRA_SAVE_DIRECTORY_REFERENCE)
+                        ?: result.getStringExtra(FileSelectionContract.EXTRA_SAVE_DIRECTORY)
                         ?: result.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)
                     directory?.let { rememberDefaultDirectory(saveRequest?.clientId, it) }
                 }
@@ -381,9 +387,12 @@ class FileSelectActivity : Activity() {
         val uris = linkedSetOf<Uri>()
         data.data?.let(uris::add)
         data.clipData?.let { clip ->
-            for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(uris::add)
+            for (index in 0 until clip.itemCount) clip.getItemAt(index).uri
+                ?.takeUnless { it.authority?.endsWith(".selection", ignoreCase = true) == true }
+                ?.let(uris::add)
         }
-        uris.forEach { uri -> runCatching { contentResolver.takePersistableUriPermission(uri, flags) } }
+        uris.filterNot { it.authority?.endsWith(".selection", ignoreCase = true) == true }
+            .forEach { uri -> runCatching { contentResolver.takePersistableUriPermission(uri, flags) } }
     }
 
     private fun returnToCaller(result: Int, data: Intent) {
@@ -397,6 +406,8 @@ class FileSelectActivity : Activity() {
             InfiniSelect.createMetadataXml(this, items) else null
         val first = items.first()
         val primary = playlistUri ?: first.uri
+        val grantedPrimary = playlistUri ?: InfiniSelect.resolveSourceReference(this, first.sourceReference)
+            ?: first.uri
         val primaryMime = if (playlistUri != null) InfiniSelect.JSPF_MIME else first.mimeType
         // The picker may return cross-app content URIs (for example, InfiniFolder
         // relay URIs). Re-grant every selected URI to our caller before forwarding
@@ -404,15 +415,32 @@ class FileSelectActivity : Activity() {
         // a multi-item result, crashing the picker and dropping the selection.
         val recipientPackage = callingPackage ?: callingActivity?.packageName
         if (recipientPackage != null && recipientPackage != packageName) {
+            val resultDirectoryReference = data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
+                ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)
+            val persistentReferences = buildSet {
+                items.mapNotNullTo(this) { it.sourceReference?.let(Uri::parse) }
+                items.mapNotNullTo(this) { it.directoryReference?.let(Uri::parse) }
+                items.mapNotNullTo(this) { it.directoryCoverReference?.let(Uri::parse) }
+                resultDirectoryReference?.let { runCatching { Uri.parse(it) }.getOrNull() }?.let(::add)
+            }
             val forwardedUris = buildList {
                 add(primary)
                 items.forEach { add(it.uri) }
+                items.mapNotNullTo(this) { it.sourceReference?.let(Uri::parse) }
+                items.mapNotNullTo(this) { it.directoryUri }
+                items.mapNotNullTo(this) { it.directoryReference?.let(Uri::parse) }
                 items.mapNotNullTo(this) { it.directoryCoverUri }
+                items.mapNotNullTo(this) { it.directoryCoverReference?.let(Uri::parse) }
+                resultDirectoryReference?.let { runCatching { Uri.parse(it) }.getOrNull() }?.let(::add)
                 metadataUri?.let(::add)
             }.distinct()
             runCatching {
                 forwardedUris.forEach { uri ->
-                    grantUriPermission(recipientPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    val canPersist = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0 &&
+                        uri in persistentReferences
+                    val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or if (canPersist)
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION else 0
+                    grantUriPermission(recipientPackage, uri, flags)
                 }
             }.onFailure { error ->
                 setResult(RESULT_CANCELED, Intent().putExtra(
@@ -423,7 +451,7 @@ class FileSelectActivity : Activity() {
                 return
             }
         }
-        data.setDataAndType(primary, primaryMime)
+        data.setDataAndType(grantedPrimary, primaryMime)
         data.putExtra(FileSelectionContract.EXTRA_RESULT_URI, first.uri.toString())
         data.putExtra(FileSelectionContract.EXTRA_RESULT_NAME, first.name)
         data.putExtra(FileSelectionContract.EXTRA_RESULT_MIME, first.mimeType)
@@ -432,12 +460,18 @@ class FileSelectActivity : Activity() {
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_NAMES, ArrayList(items.map { it.name }))
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_MIMES, ArrayList(items.map { it.mimeType }))
         data.putExtra(FileSelectionContract.EXTRA_RESULT_SIZES, items.map { it.sizeBytes ?: -1L }.toLongArray())
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES,
+            ArrayList(items.map { it.sourceReference ?: it.uri.toString() }))
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS,
             ArrayList(items.map { it.directoryUri?.toString().orEmpty() }))
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES,
             ArrayList(items.map { it.directoryName.orEmpty() }))
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES,
+            ArrayList(items.map { it.directoryReference ?: it.directoryUri?.toString().orEmpty() }))
         data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS,
             ArrayList(items.map { it.directoryCoverUri?.toString().orEmpty() }))
+        data.putStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES,
+            ArrayList(items.map { it.directoryCoverReference ?: it.directoryCoverUri?.toString().orEmpty() }))
         playlistUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_PLAYLIST_URI, it.toString()) }
         metadataUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_METADATA_URI, it.toString()) }
         data.putExtra("displayName", if (playlistUri != null) "Selection.jspf" else first.name)
@@ -449,13 +483,24 @@ class FileSelectActivity : Activity() {
         data.flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or persistableGrant or
             (data.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         val clipUris = if (playlistUri != null) {
-            // The JSPF holds the individual file and cover-image URI metadata.
-            // The app grants those directly, so only return the compact playlist
-            // document in ClipData instead of hundreds of duplicate grant items.
-            listOfNotNull(primary, metadataUri)
+            // Keep stable references in ClipData so Android can persist their
+            // document-provider grants; the JSPF carries the matching strings.
+            buildList {
+                add(primary)
+                items.mapNotNullTo(this) { it.sourceReference?.let(Uri::parse) }
+                items.mapNotNullTo(this) { it.directoryReference?.let(Uri::parse) }
+                items.mapNotNullTo(this) { it.directoryCoverReference?.let(Uri::parse) }
+                data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
+                    ?.let { runCatching { Uri.parse(it) }.getOrNull() }?.let(::add)
+                metadataUri?.let(::add)
+            }.distinct()
         } else buildList {
-            addAll(items.map { it.uri })
-            addAll(items.mapNotNull { it.directoryCoverUri }.distinct())
+            items.mapNotNullTo(this) { it.sourceReference?.let(Uri::parse) }
+            items.mapNotNullTo(this) { it.directoryUri }
+            items.mapNotNullTo(this) { it.directoryReference?.let(Uri::parse) }
+            items.mapNotNullTo(this) { it.directoryCoverReference?.let(Uri::parse) }
+            data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
+                ?.let { runCatching { Uri.parse(it) }.getOrNull() }?.let(::add)
             metadataUri?.let(::add)
         }.distinct()
         data.clipData = android.content.ClipData.newRawUri(
@@ -480,6 +525,9 @@ class FileSelectActivity : Activity() {
         val directoryUris = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS).orEmpty()
         val directoryNames = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES).orEmpty()
         val directoryCoverUris = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS).orEmpty()
+        val sourceReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES).orEmpty()
+        val directoryReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES).orEmpty()
+        val directoryCoverReferences = data.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES).orEmpty()
         return candidates.mapIndexed { index, uri ->
             val suppliedName = names.getOrNull(index)?.takeIf(String::isNotBlank)
             val suppliedMime = mimes.getOrNull(index)?.takeIf(String::isNotBlank)
@@ -504,9 +552,14 @@ class FileSelectActivity : Activity() {
                     ?: contentResolver.getType(uri) ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_MIME)
                     ?: "application/octet-stream",
                 suppliedSize ?: queried.second,
+                sourceReference = sourceReferences.getOrNull(index)?.takeIf(String::isNotBlank) ?: uri.toString(),
                 directoryUri = directoryUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
                 directoryName = directoryNames.getOrNull(index)?.takeIf(String::isNotBlank),
+                directoryReference = directoryReferences.getOrNull(index)?.takeIf(String::isNotBlank)
+                    ?: directoryUris.getOrNull(index)?.takeIf(String::isNotBlank),
                 directoryCoverUri = directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
+                directoryCoverReference = directoryCoverReferences.getOrNull(index)?.takeIf(String::isNotBlank)
+                    ?: directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank),
                 directoryArtworkMetadataResolved = directoryUris.getOrNull(index)?.isNotBlank() == true)
         }
     }

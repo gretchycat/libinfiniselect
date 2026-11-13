@@ -29,6 +29,11 @@ object FileSelectionContract {
     const val EXTRA_ITEM_DIRECTORY_URIS = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_URIS"
     const val EXTRA_ITEM_DIRECTORY_NAMES = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_NAMES"
     const val EXTRA_ITEM_DIRECTORY_COVER_URIS = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_COVER_URIS"
+    /** Stable source identities paired by index with temporary selected content URIs. */
+    const val EXTRA_RESULT_SOURCE_REFERENCES = "io.github.gretchycat.infiniselect.RESULT_SOURCE_REFERENCES"
+    const val EXTRA_ITEM_DIRECTORY_REFERENCES = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_REFERENCES"
+    const val EXTRA_ITEM_DIRECTORY_COVER_REFERENCES = "io.github.gretchycat.infiniselect.ITEM_DIRECTORY_COVER_REFERENCES"
+    const val EXTRA_RESULT_DIRECTORY_REFERENCE = "io.github.gretchycat.infiniselect.RESULT_DIRECTORY_REFERENCE"
     const val EXTRA_FALLBACK_TO_SOURCES = "io.github.gretchycat.infiniselect.FALLBACK_TO_SOURCES"
     const val EXTRA_FAILURE_MESSAGE = "io.github.gretchycat.infiniselect.FAILURE_MESSAGE"
 
@@ -44,6 +49,7 @@ object FileSelectionContract {
     const val EXTRA_SAVE_SOURCE_URI = "io.github.gretchycat.infiniselect.SAVE_SOURCE_URI"
     const val EXTRA_SAVE_SOURCE_SIZE = "io.github.gretchycat.infiniselect.SAVE_SOURCE_SIZE"
     const val EXTRA_SAVE_DIRECTORY = "io.github.gretchycat.infiniselect.SAVE_DIRECTORY"
+    const val EXTRA_SAVE_DIRECTORY_REFERENCE = "io.github.gretchycat.infiniselect.SAVE_DIRECTORY_REFERENCE"
     const val EXTRA_SAVE_SUCCESS = "io.github.gretchycat.infiniselect.SAVE_SUCCESS"
     const val EXTRA_SAVE_RESULT_NAME = "io.github.gretchycat.infiniselect.SAVE_RESULT_NAME"
     const val EXTRA_SAVE_ERROR = "io.github.gretchycat.infiniselect.SAVE_ERROR"

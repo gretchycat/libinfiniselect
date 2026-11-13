@@ -102,12 +102,19 @@ data class SelectionItem(
     val directoryCoverUri: Uri? = null,
     /** True when recursive selection checked the directory for an image URI. */
     val directoryArtworkMetadataResolved: Boolean = false,
+    /** Stable location identity paired with [uri], which may be a short-lived read relay. */
+    val sourceReference: String? = null,
+    /** Stable location identity for [directoryUri]. */
+    val directoryReference: String? = null,
+    /** Stable location identity for [directoryCoverUri]. */
+    val directoryCoverReference: String? = null,
 )
 
 data class SelectionResult(
     val items: List<SelectionItem>,
     val playlistUri: Uri? = null,
     val metadataUri: Uri? = null,
+    val directoryReference: String? = null,
 ) {
     val primaryUri: Uri? get() = playlistUri ?: items.firstOrNull()?.uri
 }
@@ -138,9 +145,14 @@ object InfiniSelect {
     fun createDocument(context: Context, name: String, mimeType: String, contents: ByteArray): Uri =
         SelectionDocumentProvider.create(context, name, mimeType, contents)
 
-    fun defaultDirectory(context: Context, clientId: String): Uri? =
-        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-            .getString(DIRECTORY_PREFIX + clientId, null)?.let(Uri::parse)
+    fun defaultDirectory(context: Context, clientId: String): Uri? {
+        val uri = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            .getString(DIRECTORY_PREFIX + clientId, null)?.let { runCatching { Uri.parse(it) }.getOrNull() }
+            ?: return null
+        if (uri.authority == INFINIFOLDER_DOCUMENTS_AUTHORITY &&
+            context.packageManager.resolveContentProvider(INFINIFOLDER_DOCUMENTS_AUTHORITY, 0) == null) return null
+        return uri
+    }
 
     fun setDefaultDirectory(context: Context, clientId: String, uri: Uri?) {
         require(clientId.matches(Regex("[A-Za-z0-9._-]{1,80}"))) { "clientId must be a short stable identifier" }
@@ -148,6 +160,23 @@ object InfiniSelect {
             if (uri == null) remove(DIRECTORY_PREFIX + clientId)
             else putString(DIRECTORY_PREFIX + clientId, uri.toString())
         }.apply()
+    }
+
+    /**
+     * Resolve a serialized authoritative source reference to its Android URI.
+     * InfiniFolder returns stable DocumentsProvider URIs here, while Android
+     * fallback sources use their SAF content URI. The URI grant still needs to
+     * be held by this app; this method does not broaden storage permissions.
+     */
+    fun resolveSourceReference(context: Context, reference: String?): Uri? {
+        if (reference.isNullOrBlank()) return null
+        val uri = runCatching { Uri.parse(reference) }.getOrNull() ?: return null
+        return when (uri.scheme?.lowercase()) {
+            "content" -> uri.takeIf { !it.authority.isNullOrBlank() &&
+                context.packageManager.resolveContentProvider(it.authority!!, 0) != null }
+            "file" -> uri
+            else -> null
+        }
     }
 
     /** Read the normalized single- or multi-item result returned by [FileSelectActivity]. */
@@ -161,6 +190,9 @@ object InfiniSelect {
         val directoryUris = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_URIS).orEmpty()
         val directoryNames = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_NAMES).orEmpty()
         val directoryCoverUris = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_URIS).orEmpty()
+        val sourceReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_RESULT_SOURCE_REFERENCES).orEmpty()
+        val directoryReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_REFERENCES).orEmpty()
+        val directoryCoverReferences = intent.getStringArrayListExtra(FileSelectionContract.EXTRA_ITEM_DIRECTORY_COVER_REFERENCES).orEmpty()
         val itemUris = if (uris.isNotEmpty()) uris else buildList {
             intent.data?.let { add(it) }
             intent.clipData?.let { clip ->
@@ -180,9 +212,14 @@ object InfiniSelect {
                 mimeType = suppliedMime
                     ?: context.contentResolver.getType(uri) ?: "application/octet-stream",
                 sizeBytes = suppliedSize ?: queried.second,
+                sourceReference = sourceReferences.getOrNull(index)?.takeIf(String::isNotBlank) ?: uri.toString(),
                 directoryUri = directoryUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
                 directoryName = directoryNames.getOrNull(index)?.takeIf(String::isNotBlank),
+                directoryReference = directoryReferences.getOrNull(index)?.takeIf(String::isNotBlank)
+                    ?: directoryUris.getOrNull(index)?.takeIf(String::isNotBlank),
                 directoryCoverUri = directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank)?.let(Uri::parse),
+                directoryCoverReference = directoryCoverReferences.getOrNull(index)?.takeIf(String::isNotBlank)
+                    ?: directoryCoverUris.getOrNull(index)?.takeIf(String::isNotBlank),
                 directoryArtworkMetadataResolved = directoryUris.getOrNull(index)?.isNotBlank() == true,
             )
         }
@@ -190,7 +227,9 @@ object InfiniSelect {
             ?.let(Uri::parse)
             ?: intent.data?.takeIf { intent.type == JSPF_MIME }
         val metadata = intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_METADATA_URI)?.let(Uri::parse)
-        return SelectionResult(items, playlist, metadata)
+        val directoryReference = intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
+            ?: intent.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)
+        return SelectionResult(items, playlist, metadata, directoryReference)
     }
 
     /** Create a readable JSPF document whose locations are the supplied content/file URIs. */
@@ -204,9 +243,12 @@ object InfiniSelect {
                 .put("extension", org.json.JSONObject().put("io.github.gretchycat.infiniselect", org.json.JSONObject()
                     .put("mimeType", item.mimeType)
                     .put("sizeBytes", item.sizeBytes ?: org.json.JSONObject.NULL)
+                    .put("sourceReference", item.sourceReference ?: item.uri.toString())
                     .put("directoryUri", item.directoryUri?.toString() ?: org.json.JSONObject.NULL)
                     .put("directoryName", item.directoryName ?: org.json.JSONObject.NULL)
+                    .put("directoryReference", item.directoryReference ?: item.directoryUri?.toString() ?: org.json.JSONObject.NULL)
                     .put("directoryCoverUri", item.directoryCoverUri?.toString() ?: org.json.JSONObject.NULL)
+                    .put("directoryCoverReference", item.directoryCoverReference ?: item.directoryCoverUri?.toString() ?: org.json.JSONObject.NULL)
                     .put("directoryArtworkMetadataResolved", item.directoryArtworkMetadataResolved)))
             tracks.put(fields)
         }
@@ -225,8 +267,13 @@ object InfiniSelect {
             append(title.xmlEscape()).append("\">\n")
             items.forEach { item ->
                 append("  <item uri=\"").append(item.uri.toString().xmlEscape())
+                    .append("\" sourceReference=\"").append((item.sourceReference ?: item.uri.toString()).xmlEscape())
                     .append("\" name=\"").append(item.name.xmlEscape())
                     .append("\" mimeType=\"").append(item.mimeType.xmlEscape()).append("\"")
+                item.directoryUri?.let { append(" directoryUri=\"").append(it.toString().xmlEscape()).append("\"") }
+                item.directoryReference?.let { append(" directoryReference=\"").append(it.xmlEscape()).append("\"") }
+                item.directoryCoverUri?.let { append(" directoryCoverUri=\"").append(it.toString().xmlEscape()).append("\"") }
+                item.directoryCoverReference?.let { append(" directoryCoverReference=\"").append(it.xmlEscape()).append("\"") }
                 item.sizeBytes?.takeIf { it >= 0L }?.let { append(" sizeBytes=\"").append(it).append("\"") }
                 append("/>\n")
             }
@@ -253,6 +300,7 @@ object InfiniSelect {
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         .replace("\"", "&quot;").replace("'", "&apos;")
     internal const val JSPF_MIME = "application/jspf+json"
+    private const val INFINIFOLDER_DOCUMENTS_AUTHORITY = "com.infinifolder.documents"
 }
 
 /** Optional backend hook. Implementations are discovered through Java ServiceLoader. */

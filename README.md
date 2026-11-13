@@ -38,6 +38,16 @@ contract in `FileSelectionContract`. Its picker starts at Virtual root as
 requested. Multiple selection is supported by the InfiniFolder selector and
 the Android SAF fallback.
 
+Each `SelectionItem.uri` is the read-granted content URI for immediate access.
+InfiniFolder may implement it as a short-lived stream relay. `sourceReference`
+is the paired stable Android location reference; resolve it with
+`InfiniSelect.resolveSourceReference(context, item.sourceReference)` when a
+later request needs the authoritative source again. InfiniFolder references
+use its DocumentsProvider URI, while SAF results use their selected content
+URI. References do not bypass Android URI permissions. The library forwards
+persistable grants where the provider supports them, and callers can retain
+those grants with `takePersistableUriPermission` when needed.
+
 `InfiniSelect.defaultDirectory(context, clientId)` and
 `InfiniSelect.setDefaultDirectory(context, clientId, uri)` store starting
 folders in the consuming app's private preferences, partitioned by viewer ID.
@@ -117,17 +127,19 @@ not followed; unreadable folders and scan limits are reported. An optional
 `RESULT_LOADING_PROGRESS`, and `RESULT_LOADING_FAILED` while the selector
 closes and the enumeration continues. Each result includes a human-readable
 progress label and folder/track counts. Selected items also include their
-parent directory URI and display name in `SelectionItem`, the parallel
+parent directory content URI and display name in `SelectionItem`, the parallel
 `EXTRA_ITEM_DIRECTORY_URIS` / `EXTRA_ITEM_DIRECTORY_NAMES` arrays, and the
-generated JSPF InfiniSelect extension fields. This lets clients retain
+generated JSPF InfiniSelect extension fields. `directoryReference` pairs the
+directory URI with its stable location identity. This lets clients retain
 directory grouping and artwork context without rescanning the hierarchy.
 For recursive selections, InfiniFolder also attaches a read-granted URI to the
 first readable `cover.*` image in each directory. It passes the URI through
 `SelectionItem.directoryCoverUri` and the JSPF `directoryCoverUri` extension,
-along with `directoryArtworkMetadataResolved`. The playlist stores the cover as
-a URI only, never image bytes. Viewers can show a folder icon immediately and
-load the image during their background metadata pass; directories without a
-cover keep the folder icon without repeating the lookup for every track.
+along with `directoryCoverReference` and `directoryArtworkMetadataResolved`.
+The playlist stores URI references only, never image bytes. Viewers can show a
+folder icon immediately and load the image during their background metadata
+pass; directories without a cover keep the folder icon without repeating the
+lookup for every track.
 
 ## Build
 
