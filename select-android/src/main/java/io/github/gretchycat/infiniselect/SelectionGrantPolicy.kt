@@ -14,6 +14,7 @@ internal object SelectionGrantPolicy {
         directories: List<GrantableSelectionUri>,
         covers: List<GrantableSelectionUri>,
         metadata: GrantableSelectionUri?,
+        grantableAccessUris: Set<String>,
     ): List<String> = buildList {
         primary?.contentUri?.let(::add)
         items.mapNotNullTo(this) { it.contentUri }
@@ -21,6 +22,7 @@ internal object SelectionGrantPolicy {
         covers.mapNotNullTo(this) { it.contentUri }
         metadata?.contentUri?.let(::add)
     }.filter { value ->
-        value.substringBefore(':', "").equals("content", ignoreCase = true)
+        value.substringBefore(':', "").equals("content", ignoreCase = true) &&
+            value in grantableAccessUris
     }.distinct()
 }

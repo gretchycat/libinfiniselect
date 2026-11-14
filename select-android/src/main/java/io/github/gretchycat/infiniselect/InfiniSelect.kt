@@ -212,6 +212,21 @@ object InfiniSelect {
         displayName: String? = null,
         mimeType: String? = null,
         sizeBytes: Long? = null,
+    ): ResolvedSource? = resolveSourceInternal(context, reference, displayName, mimeType, sizeBytes, false)
+
+    /** Resolve for an actual read, retaining the provider's failure instead of silently returning a backend URI. */
+    fun requireSource(
+        context: Context,
+        reference: String,
+        displayName: String? = null,
+        mimeType: String? = null,
+        sizeBytes: Long? = null,
+    ): ResolvedSource = resolveSourceInternal(context, reference, displayName, mimeType, sizeBytes, true)
+        ?: throw SourceResolutionException("The resource has no resolvable authoritative location")
+
+    private fun resolveSourceInternal(
+        context: Context, reference: String?, displayName: String?, mimeType: String?, sizeBytes: Long?,
+        reportFailure: Boolean,
     ): ResolvedSource? {
         if (reference.isNullOrBlank()) return null
         val requestedUri = runCatching { Uri.parse(reference) }.getOrNull() ?: return null
@@ -236,20 +251,22 @@ object InfiniSelect {
             mimeType?.let { putString(EXTRA_MIME_TYPE, it) }
             sizeBytes?.let { putLong(EXTRA_SIZE_BYTES, it) }
         }
-        val response = runCatching {
+        val responseAttempt = runCatching {
             context.contentResolver.call(
                 Uri.Builder().scheme("content").authority(INFINIFOLDER_SELECTION_AUTHORITY).build(),
                 METHOD_RESOLVE_SOURCE,
                 null,
                 extras,
             )
-        }.getOrNull()
+        }
+        val response = responseAttempt.getOrNull()
         val contentUri = response?.getString(EXTRA_CONTENT_URI)?.let { runCatching { Uri.parse(it) }.getOrNull() }
         val authoritativeUri = response?.getString(EXTRA_AUTHORITATIVE_URI)
             ?.let { runCatching { Uri.parse(it) }.getOrNull() }
-        if (contentUri != null && authoritativeUri != null) {
+        if (contentUri?.scheme.equals("content", true) && authoritativeUri != null &&
+            !isTemporaryAccessUri(authoritativeUri)) {
             return ResolvedSource(
-                contentUri = contentUri,
+                contentUri = requireNotNull(contentUri),
                 authoritativeUri = authoritativeUri,
                 displayName = response.getString(EXTRA_DISPLAY_NAME) ?: displayName,
                 mimeType = response.getString(EXTRA_MIME_TYPE) ?: mimeType,
@@ -257,9 +274,9 @@ object InfiniSelect {
             )
         }
 
-        // Android files and temporary relay links remain useful without Folder.
-        // Backend-specific schemes never masquerade as readable content URIs.
-        return when {
+        // Locally readable files and SAF documents remain usable without Folder.
+        // A temporary relay can never stand in for the authoritative identity.
+        val fallback = when {
             uri.scheme.equals("file", true) -> runCatching {
                 val file = uri.path?.let(::File) ?: return null
                 val name = displayName?.takeIf(String::isNotBlank) ?: file.name
@@ -270,15 +287,20 @@ object InfiniSelect {
                 val content = SelectionDocumentProvider.createFileLink(context, file, name, mime)
                 ResolvedSource(content, uri, name, mime, sizeBytes ?: file.length())
             }.getOrNull()
-            uri.scheme.equals("content", true) && uri.authority.orEmpty()
-                .endsWith(SELECTION_AUTHORITY_SUFFIX, true) -> {
-                val installed = context.packageManager.resolveContentProvider(uri.authority!!, 0) != null
-                uri.takeIf { installed }?.let { ResolvedSource(it, it, displayName, mimeType, sizeBytes) }
-            }
             directAndroidContent && hasReadableAccessUri(context, uri) ->
                 ResolvedSource(uri, uri, displayName, mimeType, sizeBytes)
             else -> null
         }
+        if (fallback == null && reportFailure) {
+            val cause = responseAttempt.exceptionOrNull()
+            val message = when {
+                cause != null -> "InfiniFolder could not resolve this resource: ${cause.message ?: cause.javaClass.simpleName}"
+                response == null -> "The installed InfiniFolder cannot resolve saved storage locations. Install the current InfiniFolder build."
+                else -> "InfiniFolder returned an incomplete storage access response"
+            }
+            throw SourceResolutionException(message, cause)
+        }
+        return fallback
     }
 
     /**
@@ -293,6 +315,24 @@ object InfiniSelect {
         displayName: String? = null,
         mimeType: String? = null,
         sizeBytes: Long? = null,
+    ): ResolvedSource? = resolveSelectedSourceInternal(
+        context, contentUri, authoritativeReference, displayName, mimeType, sizeBytes, false)
+
+    /** Strict lazy resolution for readers and players; failure never returns an inaccessible backend address. */
+    fun requireSelectedSource(
+        context: Context,
+        contentUri: Uri?,
+        authoritativeReference: String?,
+        displayName: String? = null,
+        mimeType: String? = null,
+        sizeBytes: Long? = null,
+    ): ResolvedSource = resolveSelectedSourceInternal(
+        context, contentUri, authoritativeReference, displayName, mimeType, sizeBytes, true)
+        ?: throw SourceResolutionException("The resource has no resolvable authoritative location")
+
+    private fun resolveSelectedSourceInternal(
+        context: Context, contentUri: Uri?, authoritativeReference: String?, displayName: String?,
+        mimeType: String?, sizeBytes: Long?, reportFailure: Boolean,
     ): ResolvedSource? {
         val authoritative = authoritativeUri(context, authoritativeReference)
             ?: authoritativeCandidate(authoritativeReference, contentUri)
@@ -311,7 +351,8 @@ object InfiniSelect {
                 sizeBytes = sizeBytes,
             )
         }
-        return resolveSource(context, authoritative?.toString() ?: current, displayName, mimeType, sizeBytes)
+        return resolveSourceInternal(context, authoritative?.toString() ?: current,
+            displayName, mimeType, sizeBytes, reportFailure)
     }
 
     private fun hasReadableAccessUri(context: Context, uri: Uri): Boolean {
@@ -319,11 +360,11 @@ object InfiniSelect {
         if (!uri.scheme.equals("content", true)) return false
         if (context.checkUriPermission(uri, android.os.Process.myPid(), android.os.Process.myUid(),
                 Intent.FLAG_GRANT_READ_URI_PERMISSION) == android.content.pm.PackageManager.PERMISSION_GRANTED) return true
-        // Some exported content providers are readable without URI grants. A
-        // metadata query checks that case without opening or copying the body.
+        // Public metadata is not proof of permission to read a document's bytes.
+        // Providers without an explicit grant must demonstrate an openable handle;
+        // close it immediately without reading, copying or materializing the body.
         return runCatching {
-            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-                ?.use { it.moveToFirst() } == true
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } == true
         }.getOrDefault(false)
     }
 
@@ -352,6 +393,7 @@ object InfiniSelect {
         // identity if the optional app is absent. Canonicalize it when the
         // provider can answer, but never replace it with a relay URI.
         return result?.let { runCatching { Uri.parse(it) }.getOrNull() }
+            ?.takeUnless { it.isTemporarySelectionUri() }
             ?: if (temporaryRelay) null else uri
     }
 

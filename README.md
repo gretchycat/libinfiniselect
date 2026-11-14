@@ -19,8 +19,11 @@ InfiniSelect.open(
 ```
 
 Handle the Activity result as a normal Android document result. The returned
-intent carries a readable `content://` URI, a display name, MIME type, and URI
-read grant. InfiniFolder's URI is a short-lived read-only stream relay, so
+intent carries a readable `content://` URI, a display name, and MIME type. Grants
+received from the provider belong to the consuming application's UID; the internal
+selector returns the result without granting them again. Only access links with
+an actual grant enter `ClipData`; remembered directories and authoritative
+references remain metadata. InfiniFolder's URI is a short-lived read-only relay, so
 remote, archive, and provider-backed files can be opened without exposing
 storage credentials or private VFS schemes to the viewer.
 
@@ -58,17 +61,26 @@ This does not make an InfiniFolder relay URI durable.
 Resolve a saved location only when its bytes are needed:
 
 ```kotlin
-val opened = InfiniSelect.resolveSource(context, savedAuthoritativeUri.toString())
-    ?: error("The resource is unavailable")
+val opened = InfiniSelect.requireSource(context, savedAuthoritativeUri.toString())
 // Open opened.contentUri; persist opened.authoritativeUri.
 ```
 
 When a selection still includes its current access URI, pass both values to
-`resolveSelectedSource(context, contentUri, authoritativeUri, ...)`. The library
+`requireSelectedSource(context, contentUri, authoritativeUri, ...)`. The library
 keeps that readable grant for the current read and asks InfiniFolder for a fresh
 link only when the current link is no longer readable. This matters for SAF
 identities whose provider URI is canonical but whose permission was granted to
 the current temporary relay instead.
+
+The `requireSource` and `requireSelectedSource` methods throw
+`SourceResolutionException` when access cannot be established and retain the
+underlying provider error. Run them on a worker thread. A resolution failure
+does not prove that the file is invalid; players should retain the queue and
+report the error. Nullable `resolveSource` and `resolveSelectedSource` methods
+remain available for callers that explicitly handle unavailable sources.
+Remote saved locations require an installed InfiniFolder build that implements
+`STORAGE_METHOD_RESOLVE_SOURCE`; upgrading only a client does not update that
+optional storage service.
 
 This library call delegates remote, archive, and filesystem-image resolution
 to the optional InfiniFolder IPC provider. Callers do not parse backend URI
@@ -130,9 +142,10 @@ document providers do not expose a portable extension-filter API.
 
 InfiniFolder streams selected items through a grantable, read-only content URI.
 This supports files in VFS backends and archive entries without asking the
-receiving app to reuse a remote credential. The stream is sequential; a viewer
-that needs positional access must spool the content or use its own seekable
-source adapter. Relay references expire after 24 hours.
+receiving app to reuse a remote credential. Seekable backends expose positional
+access through an Android proxy descriptor; stream-only backends expose a pipe.
+Clients inspect descriptor capabilities and need not copy a resource merely
+because it crosses the application boundary. Relay references expire after 24 hours.
 
 ## Multiple items and playlists
 

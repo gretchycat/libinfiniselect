@@ -48,6 +48,11 @@ class SelectionContractTest {
             )),
             covers = listOf(GrantableSelectionUri("content://app.selection/cover-1", "sftp://host/Music/cover.jpg")),
             metadata = GrantableSelectionUri("content://app.selection/metadata.xml"),
+            grantableAccessUris = setOf(
+                "content://app.selection/selection.jspf", "content://app.selection/track-1",
+                "content://com.infinifolder.documents/document/music",
+                "content://app.selection/cover-1", "content://app.selection/metadata.xml",
+            ),
         )
 
         assertEquals(listOf(
@@ -57,5 +62,20 @@ class SelectionContractTest {
             "content://app.selection/cover-1",
             "content://app.selection/metadata.xml",
         ), result)
+    }
+
+    @Test
+    fun ungrantedSafLocationsInAccessMetadataNeverBecomeAndroidGrants() {
+        val relay = "content://com.infinifolder.selection/track-1"
+        val ungranted = "content://com.termux.documents/tree/home/document/home%2Ftrack.csv"
+        val result = SelectionGrantPolicy.collectUris(
+            primary = GrantableSelectionUri(relay),
+            items = listOf(GrantableSelectionUri(relay, ungranted)),
+            directories = listOf(GrantableSelectionUri(ungranted)),
+            covers = listOf(GrantableSelectionUri("content://other.provider/cover")),
+            metadata = null,
+            grantableAccessUris = setOf(relay),
+        )
+        assertEquals(listOf(relay), result)
     }
 }

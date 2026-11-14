@@ -51,4 +51,20 @@ class StorageAccessDeviceTest {
             assertEquals(StorageAccess.Support.SUPPORTED, StorageAccess.seekable(it))
         }
     }
+
+    @Test fun testSelectedAccessLinkRemainsReadableWithForeignSafIdentity() {
+        val bytes = byteArrayOf(7, 11, 19)
+        val content = InfiniSelect.createDocument(context, "selected.csv", "text/csv", bytes)
+        val identity = android.net.Uri.parse("content://foreign.documents/tree/home/document/home%2Fselected.csv")
+        val resolved = InfiniSelect.requireSelectedSource(context, content, identity.toString())
+        assertEquals(content, resolved.contentUri)
+        assertEquals(identity, resolved.authoritativeUri)
+        StorageAccess.openRead(context, resolved.contentUri).use { assertArrayEquals(bytes, it.readBytes()) }
+    }
+
+    @Test fun testUnavailableBackendFailsAtResolutionInsteadOfReturningItsAddressAsAccess() {
+        assertThrows(SourceResolutionException::class.java) {
+            InfiniSelect.requireSource(context, "infiniselect-test-unsupported://missing/resource.bin")
+        }
+    }
 }

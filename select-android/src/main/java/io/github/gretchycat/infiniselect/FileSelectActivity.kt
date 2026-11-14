@@ -408,12 +408,34 @@ class FileSelectActivity : Activity() {
         val primary = playlistUri ?: first.uri
         val grantedPrimary = primary
         val primaryMime = if (playlistUri != null) InfiniSelect.JSPF_MIME else first.mimeType
-        // The picker may return cross-app content URIs (for example, InfiniFolder
-        // relay URIs). Re-grant every selected URI to our caller before forwarding
-        // them in ClipData; otherwise Android can reject finish() while delivering
-        // a multi-item result, crashing the picker and dropping the selection.
         val recipientPackage = callingPackage ?: callingActivity?.packageName
-        if (recipientPackage != null && recipientPackage != packageName) {
+        val externalRecipient = recipientPackage != null && recipientPackage != packageName
+        // Metadata can contain canonical SAF locations which this UID cannot grant.
+        // Only links for which we hold a grant (or own the provider) enter ClipData.
+        // The remembered browser location is identity/state, never a file grant.
+        val grantableAccessUris = buildSet {
+            add(primary)
+            items.forEach { item ->
+                add(item.uri)
+                item.directoryUri?.let(::add)
+                item.directoryCoverUri?.let(::add)
+            }
+            metadataUri?.let(::add)
+        }.filter { uri ->
+            uri.scheme.equals("content", true) && (
+                uri.authority == "$packageName.infiniselect.documents" ||
+                    checkUriPermission(uri, android.os.Process.myPid(), android.os.Process.myUid(),
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+        }.mapTo(hashSetOf(), Uri::toString)
+        val clipUris = SelectionGrantPolicy.collectUris(
+            primary = GrantableSelectionUri(primary.toString()),
+            items = items.map { GrantableSelectionUri(it.uri.toString(), it.sourceReference) },
+            directories = items.map { GrantableSelectionUri(it.directoryUri?.toString(), it.directoryReference) },
+            covers = items.map { GrantableSelectionUri(it.directoryCoverUri?.toString(), it.directoryCoverReference) },
+            metadata = metadataUri?.let { GrantableSelectionUri(it.toString()) },
+            grantableAccessUris = grantableAccessUris,
+        ).map(Uri::parse)
+        if (externalRecipient) {
             val accessUrisFromPicker = buildSet {
                 data.data?.let(::add)
                 data.clipData?.let { clip ->
@@ -421,16 +443,9 @@ class FileSelectActivity : Activity() {
                 }
             }
             val canPersistPickerGrants = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0
-            val forwardedUris = SelectionGrantPolicy.collectUris(
-                primary = GrantableSelectionUri(primary.toString()),
-                items = items.map { GrantableSelectionUri(it.uri.toString(), it.sourceReference) },
-                directories = items.map { GrantableSelectionUri(it.directoryUri?.toString(), it.directoryReference) } +
-                    listOf(GrantableSelectionUri(data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY))),
-                covers = items.map { GrantableSelectionUri(it.directoryCoverUri?.toString(), it.directoryCoverReference) },
-                metadata = metadataUri?.let { GrantableSelectionUri(it.toString()) },
-            ).map(Uri::parse)
             runCatching {
-                forwardedUris.forEach { uri ->
+                check(primary in clipUris) { "The selected file has no transferable read grant" }
+                clipUris.forEach { uri ->
                     val canPersist = canPersistPickerGrants && uri in accessUrisFromPicker
                     val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or if (canPersist)
                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION else 0
@@ -480,24 +495,17 @@ class FileSelectActivity : Activity() {
         metadataUri?.let { data.putExtra(FileSelectionContract.EXTRA_RESULT_METADATA_URI, it.toString()) }
         data.putExtra("displayName", if (playlistUri != null) "Selection.jspf" else first.name)
         data.putExtra("mimeType", primaryMime)
-        // Consumers may keep a working queue beyond this Activity's lifetime.
-        // Providers that support persisted URI grants can then let them retain
-        // access; unsupported providers simply reject takePersistableUriPermission.
         val persistableGrant = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-        data.flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or persistableGrant or
-            (data.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        val clipUris = SelectionGrantPolicy.collectUris(
-            primary = GrantableSelectionUri(primary.toString()),
-            items = items.map { GrantableSelectionUri(it.uri.toString(), it.sourceReference) },
-            directories = items.map { GrantableSelectionUri(it.directoryUri?.toString(), it.directoryReference) } +
-                listOf(GrantableSelectionUri(data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY))),
-            covers = items.map { GrantableSelectionUri(it.directoryCoverUri?.toString(), it.directoryCoverReference) },
-            metadata = metadataUri?.let { GrantableSelectionUri(it.toString()) },
-        ).map(Uri::parse)
-        data.clipData = android.content.ClipData.newRawUri(
-            if (playlistUri != null) "Selection.jspf" else first.name, clipUris.first()).apply {
+        // This unexported Activity normally returns to the same application UID.
+        // Grants received from Folder/SAF already belong to that UID. Re-granting
+        // while finishing is unnecessary and makes Android reject metadata URIs.
+        data.flags = if (externalRecipient) Intent.FLAG_GRANT_READ_URI_PERMISSION or persistableGrant or
+            (data.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION) else 0
+        data.removeExtra(Intent.EXTRA_STREAM)
+        data.clipData = clipUris.firstOrNull()?.let { firstClip -> android.content.ClipData.newRawUri(
+            if (playlistUri != null) "Selection.jspf" else first.name, firstClip).apply {
             clipUris.drop(1).forEach { addItem(android.content.ClipData.Item(it)) }
-        }
+        } }
         setResult(result, data)
         finish()
     }
