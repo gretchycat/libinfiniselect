@@ -63,6 +63,13 @@ val opened = InfiniSelect.resolveSource(context, savedAuthoritativeUri.toString(
 // Open opened.contentUri; persist opened.authoritativeUri.
 ```
 
+When a selection still includes its current access URI, pass both values to
+`resolveSelectedSource(context, contentUri, authoritativeUri, ...)`. The library
+keeps that readable grant for the current read and asks InfiniFolder for a fresh
+link only when the current link is no longer readable. This matters for SAF
+identities whose provider URI is canonical but whose permission was granted to
+the current temporary relay instead.
+
 This library call delegates remote, archive, and filesystem-image resolution
 to the optional InfiniFolder IPC provider. Callers do not parse backend URI
 syntax. `ResolvedSource` always keeps the access URI and authoritative

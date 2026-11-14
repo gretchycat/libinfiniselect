@@ -224,7 +224,7 @@ object InfiniSelect {
             uri.authority == INFINIFOLDER_DOCUMENTS_AUTHORITY
         val directAndroidContent = uri.scheme.equals("content", true) &&
             !legacyFolderReference && !uri.authority.orEmpty().endsWith(SELECTION_AUTHORITY_SUFFIX, true)
-        if (directAndroidContent) {
+        if (directAndroidContent && hasReadableAccessUri(context, uri)) {
             // A granted SAF URI is usable even when package visibility prevents
             // PackageManager from reporting its provider package.
             return ResolvedSource(uri, uri, displayName, mimeType, sizeBytes)
@@ -275,8 +275,56 @@ object InfiniSelect {
                 val installed = context.packageManager.resolveContentProvider(uri.authority!!, 0) != null
                 uri.takeIf { installed }?.let { ResolvedSource(it, it, displayName, mimeType, sizeBytes) }
             }
+            directAndroidContent && hasReadableAccessUri(context, uri) ->
+                ResolvedSource(uri, uri, displayName, mimeType, sizeBytes)
             else -> null
         }
+    }
+
+    /**
+     * Resolve a selected resource while retaining its current Android access link
+     * whenever the caller still has permission. Only request a fresh link from
+     * InfiniFolder after that access link expires or is unavailable.
+     */
+    fun resolveSelectedSource(
+        context: Context,
+        contentUri: Uri?,
+        authoritativeReference: String?,
+        displayName: String? = null,
+        mimeType: String? = null,
+        sizeBytes: Long? = null,
+    ): ResolvedSource? {
+        val authoritative = authoritativeUri(context, authoritativeReference)
+            ?: authoritativeCandidate(authoritativeReference, contentUri)
+        val current = contentUri?.toString()
+        val preferred = selectCurrentAccessLocation(
+            contentUri = current,
+            authoritativeUri = authoritative?.toString(),
+            hasReadAccess = contentUri?.let { hasReadableAccessUri(context, it) } == true,
+        )
+        if (preferred != null) {
+            return ResolvedSource(
+                contentUri = Uri.parse(preferred.contentUri),
+                authoritativeUri = Uri.parse(preferred.authoritativeUri),
+                displayName = displayName,
+                mimeType = mimeType,
+                sizeBytes = sizeBytes,
+            )
+        }
+        return resolveSource(context, authoritative?.toString() ?: current, displayName, mimeType, sizeBytes)
+    }
+
+    private fun hasReadableAccessUri(context: Context, uri: Uri): Boolean {
+        if (uri.scheme.equals("file", true)) return uri.path?.let(::File)?.canRead() == true
+        if (!uri.scheme.equals("content", true)) return false
+        if (context.checkUriPermission(uri, android.os.Process.myPid(), android.os.Process.myUid(),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION) == android.content.pm.PackageManager.PERMISSION_GRANTED) return true
+        // Some exported content providers are readable without URI grants. A
+        // metadata query checks that case without opening or copying the body.
+        return runCatching {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { it.moveToFirst() } == true
+        }.getOrDefault(false)
     }
 
     /** Compatibility convenience for callers that only need the current content URI. */
@@ -617,6 +665,21 @@ object InfiniSelect {
     private const val EXTRA_BASE_URI = FileSelectionContract.STORAGE_EXTRA_BASE_URI
     private const val EXTRA_RELATIVE_PATH = FileSelectionContract.STORAGE_EXTRA_RELATIVE_PATH
     private const val EXTRA_RESOLVED_URI = FileSelectionContract.STORAGE_EXTRA_RESOLVED_URI
+}
+
+internal data class SelectedSourceLocations(val contentUri: String, val authoritativeUri: String)
+
+/** Pure selection rule shared with JVM contract tests. */
+internal fun selectCurrentAccessLocation(
+    contentUri: String?,
+    authoritativeUri: String?,
+    hasReadAccess: Boolean,
+): SelectedSourceLocations? {
+    if (!hasReadAccess || contentUri.isNullOrBlank()) return null
+    val identity = authoritativeUri?.takeIf(String::isNotBlank)
+        ?: contentUri.takeUnless(::isTemporarySelectionReference)
+        ?: return null
+    return SelectedSourceLocations(contentUri, identity)
 }
 
 private fun Uri.isTemporarySelectionUri(): Boolean =

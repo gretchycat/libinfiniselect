@@ -414,29 +414,24 @@ class FileSelectActivity : Activity() {
         // a multi-item result, crashing the picker and dropping the selection.
         val recipientPackage = callingPackage ?: callingActivity?.packageName
         if (recipientPackage != null && recipientPackage != packageName) {
-            val resultDirectoryReference = data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
-                ?: data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY)
-            val persistentReferences = buildSet {
-                items.mapNotNullTo(this) { it.sourceReference?.let(::parseGrantableContentUri) }
-                items.mapNotNullTo(this) { it.directoryReference?.let(::parseGrantableContentUri) }
-                items.mapNotNullTo(this) { it.directoryCoverReference?.let(::parseGrantableContentUri) }
-                resultDirectoryReference?.let(::parseGrantableContentUri)?.let(::add)
+            val accessUrisFromPicker = buildSet {
+                data.data?.let(::add)
+                data.clipData?.let { clip ->
+                    for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(::add)
+                }
             }
-            val forwardedUris = buildList {
-                add(primary)
-                items.forEach { add(it.uri) }
-                items.mapNotNullTo(this) { it.sourceReference?.let(::parseGrantableContentUri) }
-                items.mapNotNullTo(this) { it.directoryUri }
-                items.mapNotNullTo(this) { it.directoryReference?.let(::parseGrantableContentUri) }
-                items.mapNotNullTo(this) { it.directoryCoverUri }
-                items.mapNotNullTo(this) { it.directoryCoverReference?.let(::parseGrantableContentUri) }
-                resultDirectoryReference?.let(::parseGrantableContentUri)?.let(::add)
-                metadataUri?.let(::add)
-            }.filter { it.scheme.equals("content", true) }.distinct()
+            val canPersistPickerGrants = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0
+            val forwardedUris = SelectionGrantPolicy.collectUris(
+                primary = GrantableSelectionUri(primary.toString()),
+                items = items.map { GrantableSelectionUri(it.uri.toString(), it.sourceReference) },
+                directories = items.map { GrantableSelectionUri(it.directoryUri?.toString(), it.directoryReference) } +
+                    listOf(GrantableSelectionUri(data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY))),
+                covers = items.map { GrantableSelectionUri(it.directoryCoverUri?.toString(), it.directoryCoverReference) },
+                metadata = metadataUri?.let { GrantableSelectionUri(it.toString()) },
+            ).map(Uri::parse)
             runCatching {
                 forwardedUris.forEach { uri ->
-                    val canPersist = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0 &&
-                        uri in persistentReferences
+                    val canPersist = canPersistPickerGrants && uri in accessUrisFromPicker
                     val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or if (canPersist)
                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION else 0
                     grantUriPermission(recipientPackage, uri, flags)
@@ -491,18 +486,14 @@ class FileSelectActivity : Activity() {
         val persistableGrant = data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
         data.flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or persistableGrant or
             (data.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        val clipUris = buildList {
-            add(primary)
-            items.mapNotNullTo(this) { it.uri }
-            items.mapNotNullTo(this) { it.sourceReference?.let(::parseGrantableContentUri) }
-            items.mapNotNullTo(this) { it.directoryUri }
-            items.mapNotNullTo(this) { it.directoryReference?.let(::parseGrantableContentUri) }
-            items.mapNotNullTo(this) { it.directoryCoverUri }
-            items.mapNotNullTo(this) { it.directoryCoverReference?.let(::parseGrantableContentUri) }
-            data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY_REFERENCE)
-                ?.let(::parseGrantableContentUri)?.let(::add)
-            metadataUri?.let(::add)
-        }.filter { it.scheme.equals("content", true) }.distinct()
+        val clipUris = SelectionGrantPolicy.collectUris(
+            primary = GrantableSelectionUri(primary.toString()),
+            items = items.map { GrantableSelectionUri(it.uri.toString(), it.sourceReference) },
+            directories = items.map { GrantableSelectionUri(it.directoryUri?.toString(), it.directoryReference) } +
+                listOf(GrantableSelectionUri(data.getStringExtra(FileSelectionContract.EXTRA_RESULT_DIRECTORY))),
+            covers = items.map { GrantableSelectionUri(it.directoryCoverUri?.toString(), it.directoryCoverReference) },
+            metadata = metadataUri?.let { GrantableSelectionUri(it.toString()) },
+        ).map(Uri::parse)
         data.clipData = android.content.ClipData.newRawUri(
             if (playlistUri != null) "Selection.jspf" else first.name, clipUris.first()).apply {
             clipUris.drop(1).forEach { addItem(android.content.ClipData.Item(it)) }
@@ -568,9 +559,6 @@ class FileSelectActivity : Activity() {
                 directoryArtworkMetadataResolved = directoryUris.getOrNull(index)?.isNotBlank() == true)
         }
     }
-
-    private fun parseGrantableContentUri(reference: String): Uri? = runCatching { Uri.parse(reference) }
-        .getOrNull()?.takeIf { it.scheme.equals("content", true) }
 
     private fun finishWithCancel() { setResult(RESULT_CANCELED); finish() }
 
